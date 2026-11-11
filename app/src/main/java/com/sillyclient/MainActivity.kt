@@ -21,6 +21,7 @@ import com.sillyclient.render.HapticController
 import com.sillyclient.render.RenderDocumentCommitState
 import com.sillyclient.render.RenderEngineManager
 import com.sillyclient.render.RenderSettings
+import com.sillyclient.ui.DeepSeekModelOptions
 import com.sillyclient.ui.FileChooserMimeTypes
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -750,6 +751,7 @@ class MainActivity : BridgeActivity() {
                     super.onPageCommitVisible(view, url)
                     renderDocumentCommitState.markCommitted(renderDocumentCommitState.currentToken)
                     android.util.Log.i(TAG, "Tavern main frame committed")
+                    injectDeepSeekModelOptions()
                 }
 
                 override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -806,6 +808,7 @@ class MainActivity : BridgeActivity() {
                     installChameleonProbes()
                     injectRenderEngine()
                     injectMobileLayoutOptimizations()
+                    injectDeepSeekModelOptions()
                     recordTavernDocumentDiagnostics(url)
                 }
             }
@@ -1972,6 +1975,15 @@ class MainActivity : BridgeActivity() {
                 android.util.Log.w(TAG, "Heartbeat probe non-fatal hiccup: ${e.message}")
             }
         }.start()
+    }
+
+    /**
+     * DeepSeek 模型下拉的初始选项只有「连接到 API」。在页面里补上当前可调用的
+     * 模型名，连接接口后仍保留服务端返回的列表。
+     */
+    private fun injectDeepSeekModelOptions() {
+        if (!::webView.isInitialized) return
+        webView.evaluateJavascript(DeepSeekModelOptions.script(), null)
     }
 
     /**
