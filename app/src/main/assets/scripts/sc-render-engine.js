@@ -1,11 +1,11 @@
 /**
- * SillyClient Render Engine v0.2.3
+ * SillyClient Render Engine v0.2.4
  * 位于 SillyTavern 与 WebView/Chromium 之间的深度渲染调度引擎
  *
  * 核心架构组件:
  * 1. ChameleonEngine: 变色龙精准事件感知取色 (首帧瞬时同步 + 定向 DOM 变动通知，彻底 0 轮询)
  * 2. Streaming Diagnostics: HUD-only native-frame metrics without intercepting DOM writes
- * 3. Optional Performance Preset: 消息布局隔离、资源按需渲染与既有抽屉动画
+ * 3. Optional Performance Preset: 长聊天视口外消息跳过排版绘制、资源按需渲染与既有抽屉动画
  * 4. Existing Visual Rules: 保持原有样式与动画，包含抽屉打开时既有的聊天毛玻璃规则
  * 5. FrameScheduler: 读写严格分离原子化调度 (Read/Write Phase 严格隔离)
  * 6. Offscreen Animation Freeze: 预设开启时按需观察并挂起视口外动画
@@ -641,7 +641,6 @@
                 contain: layout style paint;
                 isolation: isolate;
                 transform: translateZ(0);
-                will-change: scroll-position;
                 scroll-behavior: auto !important;
                 text-rendering: optimizeSpeed !important;
             }
@@ -656,6 +655,10 @@
             }
             #chat .mes {
                 contain: layout style !important;
+            }
+            #chat .mes.__sc-mes-skipped {
+                content-visibility: auto;
+                contain-intrinsic-block-size: auto 160px;
             }
             #chat .mes:last-child {
                 transform: translateZ(0);
@@ -703,7 +706,6 @@
         `;
         document.head.appendChild(style);
         performanceStyle = style;
-        engineState.virtualizationActive = true;
     }
 
     let drawerPatch = null;
@@ -885,6 +887,7 @@
             animationScanTimer = null;
             if (!isCurrentlyInteracting() && (!deadline || deadline.timeRemaining() > 3)) {
                 scanAndObserveAnimations();
+                bindChatMessages();
             }
             animationScanTimer = setTimeout(() => scheduleIdleScan(generation), 4000);
         };
@@ -910,6 +913,163 @@
         engineState.frozenAnimCount = 0;
     }
 
+    // ========================================================
+    // 7b. 长聊天视口外消息：先量到真实高度，再按该高度跳过排版
+    // ========================================================
+    const SKIPPED_MESSAGE = '__sc-mes-skipped';
+    const observedMessages = new Set();
+    let chatVisibilityObserver = null;
+    let chatListObserver = null;
+    let boundChat = null;
+    let chatVirtualizationGeneration = 0;
+
+    function rememberMessageHeight(message, height) {
+        if (height <= 0) return;
+        const next = `auto ${height}px`;
+        if (message.style.containIntrinsicBlockSize !== next) {
+            message.style.containIntrinsicBlockSize = next;
+        }
+    }
+
+    function clearMessageSkip(message) {
+        message.classList.remove(SKIPPED_MESSAGE);
+        message.style.containIntrinsicBlockSize = '';
+    }
+
+    function releaseObservedMessage(message) {
+        if (chatVisibilityObserver) chatVisibilityObserver.unobserve(message);
+        observedMessages.delete(message);
+        clearMessageSkip(message);
+    }
+
+    function chatVirtualizationIsCurrent(generation) {
+        return generation === chatVirtualizationGeneration &&
+            isPerformancePresetActive() && chatVisibilityObserver !== null;
+    }
+
+    function applyMessageVisibility(generation, entries) {
+        if (!chatVirtualizationIsCurrent(generation)) return;
+        const observer = chatVisibilityObserver;
+        const reveal = [];
+        const skip = [];
+        for (let i = 0; i < entries.length; i++) {
+            const message = entries[i].target;
+            if (!message.isConnected || !observedMessages.has(message)) continue;
+            if (entries[i].isIntersecting) reveal.push(message);
+            else skip.push(message);
+        }
+        for (let i = 0; i < reveal.length; i++) reveal[i].classList.remove(SKIPPED_MESSAGE);
+        const revealHeights = [];
+        for (let i = 0; i < reveal.length; i++) {
+            revealHeights.push(Math.ceil(reveal[i].getBoundingClientRect().height));
+        }
+        const skipHeights = [];
+        for (let i = 0; i < skip.length; i++) {
+            const message = skip[i];
+            skipHeights.push(message.classList.contains(SKIPPED_MESSAGE) ? 0 : Math.ceil(message.getBoundingClientRect().height));
+        }
+        if (!chatVirtualizationIsCurrent(generation) || chatVisibilityObserver !== observer) return;
+        for (let i = 0; i < reveal.length; i++) rememberMessageHeight(reveal[i], revealHeights[i]);
+        for (let i = 0; i < skip.length; i++) {
+            const message = skip[i];
+            rememberMessageHeight(message, skipHeights[i]);
+            if (message.style.containIntrinsicBlockSize) message.classList.add(SKIPPED_MESSAGE);
+        }
+    }
+
+    function observeChatMessage(message) {
+        if (!chatVisibilityObserver || observedMessages.has(message)) return;
+        chatVisibilityObserver.observe(message);
+        observedMessages.add(message);
+    }
+
+    function collectMessages(node, into) {
+        if (!(node instanceof Element)) return;
+        if (node.classList.contains('mes')) into.push(node);
+        const nested = node.querySelectorAll('.mes');
+        for (let i = 0; i < nested.length; i++) into.push(nested[i]);
+    }
+
+    function stopChatListObserver() {
+        if (chatListObserver) chatListObserver.disconnect();
+        chatListObserver = null;
+        boundChat = null;
+    }
+
+    function bindChatMessages() {
+        if (!chatVisibilityObserver || !isPerformancePresetActive()) return;
+        const chat = document.getElementById('chat');
+        if (!chat) {
+            stopChatListObserver();
+            for (const message of Array.from(observedMessages)) releaseObservedMessage(message);
+            return;
+        }
+        if (boundChat !== chat) {
+            stopChatListObserver();
+            boundChat = chat;
+            const generation = chatVirtualizationGeneration;
+            try {
+                chatListObserver = new MutationObserver((mutations) => {
+                    if (!chatVirtualizationIsCurrent(generation) || boundChat !== chat) return;
+                    const removed = [];
+                    for (let i = 0; i < mutations.length; i++) {
+                        const mutation = mutations[i];
+                        for (let n = 0; n < mutation.addedNodes.length; n++) {
+                            const added = [];
+                            collectMessages(mutation.addedNodes[n], added);
+                            for (let m = 0; m < added.length; m++) observeChatMessage(added[m]);
+                        }
+                        for (let n = 0; n < mutation.removedNodes.length; n++) {
+                            collectMessages(mutation.removedNodes[n], removed);
+                        }
+                    }
+                    for (let i = 0; i < removed.length; i++) releaseObservedMessage(removed[i]);
+                });
+                chatListObserver.observe(chat, { childList: true });
+            } catch (_) {
+                chatListObserver = null;
+            }
+        }
+        const live = chat.querySelectorAll('.mes');
+        const seen = new Set();
+        for (let i = 0; i < live.length; i++) {
+            seen.add(live[i]);
+            observeChatMessage(live[i]);
+        }
+        for (const message of Array.from(observedMessages)) {
+            if (!seen.has(message)) releaseObservedMessage(message);
+        }
+    }
+
+    function startChatVirtualization() {
+        if (chatVisibilityObserver || !isPerformancePresetActive() || !window.IntersectionObserver) return;
+        const generation = ++chatVirtualizationGeneration;
+        try {
+            const observer = new IntersectionObserver((entries) => {
+                applyMessageVisibility(generation, entries);
+            }, { root: null, rootMargin: '240px 0px' });
+            chatVisibilityObserver = observer;
+            engineState.virtualizationActive = true;
+            bindChatMessages();
+            if (!chatVirtualizationIsCurrent(generation) || chatVisibilityObserver !== observer) {
+                stopChatVirtualization();
+            }
+        } catch (_) {
+            stopChatVirtualization();
+        }
+    }
+
+    function stopChatVirtualization() {
+        chatVirtualizationGeneration++;
+        const observer = chatVisibilityObserver;
+        chatVisibilityObserver = null;
+        if (observer) observer.disconnect();
+        stopChatListObserver();
+        for (const message of observedMessages) clearMessageSkip(message);
+        observedMessages.clear();
+        engineState.virtualizationActive = false;
+    }
+
     function syncPerformancePreset() {
         if (!disposed && renderSettings.performancePreset) {
             performancePresetActive = true;
@@ -917,13 +1077,16 @@
             installDrawerAnimations();
             if (isPageActive()) {
                 startAnimationScan();
+                startChatVirtualization();
             } else {
                 pauseAnimationScan();
+                stopChatVirtualization();
                 settleOwnedDrawerAnimations();
             }
         } else {
             performancePresetActive = false;
             pauseAnimationScan();
+            stopChatVirtualization();
             stopDrawerAnimations();
             if (performanceStyle) performanceStyle.remove();
             performanceStyle = null;
@@ -1375,7 +1538,7 @@
     // 10. UNIFIED ENGINE NAMESPACE
     // ========================================================
     window.SillyClientEngine = {
-        version: '0.2.3',
+        version: '0.2.4',
         state: engineState,
         scheduler: scheduler,
         batcher: streamingBatcher,

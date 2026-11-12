@@ -419,7 +419,7 @@ test("a renderer installed while hidden starts no timers frames or observers", a
   });
   assert.deepEqual(result, {
     hidden: { intervals: 0, frames: 0, observers: 0, timers: 0 },
-    resumed: { intervals: 0, frames: 0, observers: 1, timers: 2 },
+    resumed: { intervals: 0, frames: 0, observers: 3, timers: 2 },
   });
 });
 
@@ -500,8 +500,8 @@ test("animation observation drops detached nodes and ignores late visibility not
   const result = await page.evaluate(() => {
     renderTest.timeout(2000);
     renderTest.runIdle();
-    const observer = renderTest.observers.find(item => item.kind === "intersection");
     const spinner = document.querySelector(".spinner");
+    const observer = renderTest.observers.find(item => item.kind === "intersection" && item.targets.has(spinner));
     observer.callback([{ target: spinner, isIntersecting: false }]);
     const frozen = SillyClientEngine.state.frozenAnimCount;
     spinner.remove();
@@ -531,7 +531,7 @@ test("fallback animation scan timers are canceled while hidden and on disposal",
     SillyClientEngine.dispose();
     return { scheduled, hidden, observed, timers: renderTest.timers.size, observers: renderTest.activeObservers() };
   });
-  assert.deepEqual(result, { scheduled: 1, hidden: 0, observed: 1, timers: 0, observers: 0 });
+  assert.deepEqual(result, { scheduled: 1, hidden: 0, observed: 2, timers: 0, observers: 0 });
 });
 
 test("chameleon reports changed theme color once when a hidden page resumes", async () => {
@@ -573,8 +573,8 @@ test("once completion cancels owned jobs and stale startup or mutation callbacks
     };
   });
   assert.deepEqual(result, {
-    settled: { sampled: true, observers: 0, jobs: [] },
-    observers: 0, jobs: [], reports: 2,
+    settled: { sampled: true, observers: 1, jobs: [] },
+    observers: 1, jobs: [], reports: 2,
   });
 });
 
@@ -590,7 +590,7 @@ test("disabled extraction cancels startup and ignores late mutation notification
     return { disabled, observers: renderTest.activeObservers("mutation"), jobs: renderTest.chameleonJobs() };
   });
   assert.deepEqual(result, {
-    disabled: { observers: 0, jobs: [] }, observers: 0, jobs: [],
+    disabled: { observers: 1, jobs: [] }, observers: 1, jobs: [],
   });
 });
 
@@ -611,7 +611,7 @@ test("completed once extraction remains dormant across repeated visibility and B
       observers: renderTest.activeObservers("mutation"), jobs: renderTest.chameleonJobs(),
     };
   });
-  assert.deepEqual(result, { sampled: true, observers: 0, jobs: [] });
+  assert.deepEqual(result, { sampled: true, observers: 1, jobs: [] });
 });
 
 test("explicit native refresh can recalibrate completed once extraction without restarting automatic work", async () => {
@@ -631,7 +631,7 @@ test("explicit native refresh can recalibrate completed once extraction without 
     };
   });
   assert.deepEqual(result, {
-    lastColor: 0xff000000 | 40 << 16 | 50 << 8 | 60, sampled: true, observers: 0, jobs: [],
+    lastColor: 0xff000000 | 40 << 16 | 50 << 8 | 60, sampled: true, observers: 1, jobs: [],
   });
 });
 
@@ -680,7 +680,7 @@ test("changing completed once extraction to realtime restores observation and ch
     };
   });
   assert.deepEqual(result, {
-    sampled: false, observers: 1,
+    sampled: false, observers: 2,
     recentColors: [0xff000000 | 40 << 16 | 50 << 8 | 60, 0xff000000 | 70 << 16 | 80 << 8 | 90],
   });
 });
@@ -700,7 +700,7 @@ test("changing pending once extraction to realtime cancels both once-settle path
       observers: renderTest.activeObservers("mutation"), pendingAfterChange, jobs: renderTest.chameleonJobs(),
     };
   });
-  assert.deepEqual(result, { sampled: false, observers: 1, pendingAfterChange: [1500], jobs: [1500] });
+  assert.deepEqual(result, { sampled: false, observers: 2, pendingAfterChange: [1500], jobs: [1500] });
 });
 
 for (const mode of ["once", "realtime"]) {
@@ -719,7 +719,7 @@ for (const mode of ["once", "realtime"]) {
       };
     }, mode);
     assert.deepEqual(result, {
-      sampled: mode === "once", observers: mode === "once" ? 0 : 1,
+      sampled: mode === "once", observers: mode === "once" ? 1 : 2,
       jobs: mode === "once" ? [] : [1500], lastColor: 0xff000000 | 10 << 16 | 20 << 8 | 30,
     });
   });
@@ -806,9 +806,73 @@ test("disposal is idempotent and releases owned diagnostics feature observers qu
 
 test("full-fidelity visual CSS and short existing drawer durations remain unchanged", () => {
   assert.match(source, /#chat \.mes:last-child\s*\{\s*transform:\s*translateZ\(0\)/);
+  assert.match(source, /#chat \.mes\.__sc-mes-skipped\s*\{[^}]*content-visibility:\s*auto;/);
+  assert.match(source, /contain-intrinsic-block-size:\s*auto 160px;/);
   assert.match(source, /backdrop-filter:\s*blur\(24px\) saturate\(1\.4\)/);
   assert.match(source, /box-shadow:\s*0 16px 40px/);
-  assert.match(source, /duration:\s*90\b/);
-  assert.match(source, /duration:\s*70\b/);
+  assert.match(source, /duration:\s*toOpen \? 90 : 70/);
+  assert.doesNotMatch(source, /will-change:\s*scroll-position/);
   assert.doesNotMatch(source, /(?:maxFps|targetFps|streamingFpsLimit)\s*[:=]\s*30\b|duration:\s*260\b|__sc-scrolling/);
+});
+
+test("long chat skips measured offscreen messages without dropping text or moving scroll", async () => {
+  const result = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "280px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 40; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.innerHTML = `<div class="mes_text"><div style="height:480px">message ${index} stays in the document</div></div>`;
+      chat.append(message);
+    }
+    await Promise.resolve();
+    const messages = [...chat.querySelectorAll(".mes")];
+    const far = messages[35];
+    const observer = renderTest.observers.find(item => item.kind === "intersection" && item.targets.has(far));
+    const before = {
+      onscreen: messages[0].getBoundingClientRect().height,
+      offscreen: far.getBoundingClientRect().height,
+      scrollTop: chat.scrollTop,
+      scrollHeight: chat.scrollHeight,
+    };
+    observer.callback([
+      { target: messages[0], isIntersecting: true },
+      { target: far, isIntersecting: false },
+    ]);
+    const skipped = {
+      onscreen: messages[0].getBoundingClientRect().height,
+      offscreen: far.getBoundingClientRect().height,
+      scrollTop: chat.scrollTop,
+      scrollHeight: chat.scrollHeight,
+      text: far.textContent,
+      skipped: far.classList.contains("__sc-mes-skipped"),
+      visibleSkipped: messages[0].classList.contains("__sc-mes-skipped"),
+      visibility: getComputedStyle(far).contentVisibility,
+      active: SillyClientEngine.state.virtualizationActive,
+    };
+    window.__scUpdateRenderSettings(true, "realtime", true, false);
+    return {
+      before,
+      skipped,
+      restoredClass: far.classList.contains("__sc-mes-skipped"),
+      restoredHeight: far.style.containIntrinsicBlockSize,
+      active: SillyClientEngine.state.virtualizationActive,
+    };
+  });
+  assert.ok(result.before.onscreen >= 480, `visible message height ${result.before.onscreen}`);
+  assert.ok(result.before.offscreen >= 480, `measured offscreen height ${result.before.offscreen}`);
+  assert.equal(result.skipped.visibleSkipped, false);
+  assert.equal(result.skipped.skipped, true);
+  assert.equal(result.skipped.visibility, "auto");
+  assert.equal(result.skipped.text, "message 35 stays in the document");
+  assert.equal(result.skipped.onscreen, result.before.onscreen);
+  assert.equal(result.skipped.offscreen, result.before.offscreen);
+  assert.equal(result.skipped.scrollTop, result.before.scrollTop);
+  assert.equal(result.skipped.scrollHeight, result.before.scrollHeight);
+  assert.equal(result.skipped.active, true);
+  assert.equal(result.restoredClass, false);
+  assert.equal(result.restoredHeight, "");
+  assert.equal(result.active, false);
 });
