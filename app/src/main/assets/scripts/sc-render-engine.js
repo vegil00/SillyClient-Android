@@ -1,5 +1,5 @@
 /**
- * SillyClient Render Engine v0.2.4
+ * SillyClient Render Engine v0.2.6
  * 位于 SillyTavern 与 WebView/Chromium 之间的深度渲染调度引擎
  *
  * 核心架构组件:
@@ -1567,13 +1567,30 @@
         chatScrollHold = stableChatAnchor;
     }
 
+    function activeScrollHold() {
+        if (chatScrollHold) return chatScrollHold;
+        // 重新生成把当前楼拆掉时，页面仍可见，锁屏那条 hold 不会武装。
+        // 这里单独把视口吸在正在生成的楼底，盖过随后的高度补偿。
+        if (generationScrollFollow) return { pinned: true, scrollTop: 0, scrollHeight: 0 };
+        // 补上的占位还在时，把读者按住在变矮之前的位置，避免 #chat 自己的高度补偿再推一截。
+        if (generationSpacerLocked && generationSpacerPx > 0 && stableChatAnchor) {
+            const chat = document.getElementById('chat');
+            return {
+                pinned: false,
+                scrollTop: stableChatAnchor.scrollTop,
+                scrollHeight: chat ? chat.scrollHeight : stableChatAnchor.scrollHeight,
+            };
+        }
+        return null;
+    }
+
     function restoreChatScroll() {
-        if (restoringChatScroll || !chatScrollHold) return;
+        const hold = activeScrollHold();
+        if (restoringChatScroll || !hold) return;
         const chat = document.getElementById('chat');
         if (!chat) return;
         restoringChatScroll = true;
         try {
-            const hold = chatScrollHold;
             const max = Math.max(0, chat.scrollHeight - chat.clientHeight);
             const target = hold.pinned
                 ? max
@@ -1596,17 +1613,373 @@
     }
 
     function noteChatScrollIntent() {
-        if (!chatScrollHold) return;
-        releaseChatScrollHold();
+        readerGesture = true;
+        if (chatScrollHold) releaseChatScrollHold();
+        if (generationScrollFollow) releaseGenerationFollow();
+        // 读者自己碰了屏幕，就不要再把滚动扳回去。占位高度先留着，避免一松手就被钳到上一楼。
+        generationSpacerLocked = false;
+    }
+
+    function noteChatScrollGestureEnd() {
+        readerGesture = false;
     }
 
     function onChatScroll(event) {
         const chat = document.getElementById('chat');
         if (!chat || event.target !== chat) return;
         // 脚本改 scrollTop 时，Chrome 仍会派发 isTrusted 的 scroll，不能拿它当读者手势。
-        if (restoringChatScroll || suppressChatAnchorSample || chatScrollHold || !isPageActive()) return;
+        // 楼变矮把滚动钳上去时，scroll 会晚一帧才到。那不是读者的选择，不能把锚点改成钳位后的位置。
+        if (restoringChatScroll || suppressChatAnchorSample || chatScrollHold || generationScrollFollow || !isPageActive()) return;
+        const message = trackedLastMessage;
+        if (!readerGesture && message && message.isConnected && stableChatAnchor &&
+            trackedMessageHeight - message.offsetHeight > 1 &&
+            chat.scrollTop < stableChatAnchor.scrollTop - 1) {
+            return;
+        }
+        readerGesture = false;
         pendingChatAnchor = readChatAnchor();
         queueMicrotask(commitPendingChatAnchor);
+        queueMicrotask(rememberTrackedMessage);
+    }
+
+    // 重新生成已经写好的那一楼时，楼会先变矮。读者若停在这一楼中间，浏览器把
+    // scrollTop 钳到新的最大值，上一楼就占满屏幕。这次钳制要等一帧才派发 scroll。
+    // 真实消息还有头像和名字，变矮后往往仍高于 140px，不能靠“收到占位高度”来判断。
+    // 钳位发生时，用一块占位把少掉的高度补回去，阅读位置留在原地；本来就贴着底部的，继续贴着这一楼。
+    const GENERATION_FOLLOW_QUIET_MS = 1200;
+    let generationScrollFollow = false;
+    let generationQuietTimer = null;
+    let generationSpacerPx = 0;
+    let generationSpacerLocked = false;
+    let readerGesture = false;
+    let generationSpacerEl = null;
+    let adjustingGenerationSpacer = false;
+    let chatMutationObserver = null;
+    let trackedMessageObserver = null;
+    let trackedChat = null;
+    let trackedLastMessage = null;
+    let trackedMessageHeight = 0;
+    let trackedMessageInView = false;
+
+    function releaseGenerationFollow() {
+        generationScrollFollow = false;
+        if (generationQuietTimer !== null) {
+            clearTimeout(generationQuietTimer);
+            generationQuietTimer = null;
+        }
+    }
+
+    function rememberTrackedMessage() {
+        const chat = document.getElementById('chat');
+        const message = trackedLastMessage;
+        if (!chat || !message || !message.isConnected) return;
+        trackedMessageHeight = message.offsetHeight;
+        trackedMessageInView = messageIntersectsChat(message, chat);
+    }
+
+    function messageIntersectsChat(message, chat) {
+        if (!message || !chat) return false;
+        const messageRect = message.getBoundingClientRect();
+        const chatRect = chat.getBoundingClientRect();
+        return messageRect.bottom > chatRect.top - 8 && messageRect.top < chatRect.bottom + 8;
+    }
+
+    function scrollClampedUp(chat) {
+        return !!(chat && stableChatAnchor && stableChatAnchor.scrollTop - chat.scrollTop > 1);
+    }
+
+    function applyGenerationSpacer(chat) {
+        if (!generationSpacerEl) {
+            generationSpacerEl = document.createElement('div');
+            generationSpacerEl.setAttribute('data-sc-generation-spacer', '');
+            generationSpacerEl.style.cssText = 'width:100%;flex:0 0 auto;pointer-events:none;visibility:hidden;overflow:hidden;';
+        }
+        if (generationSpacerEl.parentNode !== chat) chat.appendChild(generationSpacerEl);
+        const height = generationSpacerPx + 'px';
+        generationSpacerEl.style.height = height;
+        generationSpacerEl.style.minHeight = height;
+    }
+
+    function preserveScrollAgainstShrink(chat) {
+        if (!stableChatAnchor || !chat) return;
+        const lost = stableChatAnchor.scrollTop - chat.scrollTop;
+        if (lost <= 1) return;
+        const target = stableChatAnchor.scrollTop;
+        generationSpacerPx += lost;
+        generationSpacerLocked = true;
+        suppressChatAnchorSample = true;
+        adjustingGenerationSpacer = true;
+        try {
+            applyGenerationSpacer(chat);
+            const max = Math.max(0, chat.scrollHeight - chat.clientHeight);
+            const next = Math.min(max, target);
+            if (Math.abs(chat.scrollTop - next) > 1) chat.scrollTop = next;
+        } finally {
+            adjustingGenerationSpacer = false;
+            suppressChatAnchorSample = false;
+        }
+        scheduleGenerationQuiet();
+    }
+
+    function consumeGenerationSpacer(chat, growth) {
+        if (!chat || generationSpacerPx <= 0 || growth <= 0) return;
+        const target = stableChatAnchor ? stableChatAnchor.scrollTop : chat.scrollTop;
+        generationSpacerPx = Math.max(0, generationSpacerPx - growth);
+        if (generationSpacerPx === 0) generationSpacerLocked = false;
+        suppressChatAnchorSample = true;
+        adjustingGenerationSpacer = true;
+        try {
+            applyGenerationSpacer(chat);
+            const max = Math.max(0, chat.scrollHeight - chat.clientHeight);
+            const next = Math.min(max, target);
+            if (Math.abs(chat.scrollTop - next) > 1) chat.scrollTop = next;
+        } finally {
+            adjustingGenerationSpacer = false;
+            suppressChatAnchorSample = false;
+        }
+        scheduleGenerationQuiet();
+    }
+
+    function releaseIdleGenerationSpacer() {
+        const chat = document.getElementById('chat');
+        if (!chat || generationSpacerPx <= 0) return;
+        const maxWithoutSpacer = chat.scrollHeight - generationSpacerPx - chat.clientHeight;
+        if (chat.scrollTop > maxWithoutSpacer + 1) return;
+        generationSpacerPx = 0;
+        generationSpacerLocked = false;
+        if (generationSpacerEl) {
+            generationSpacerEl.style.height = '0px';
+            generationSpacerEl.style.minHeight = '0px';
+        }
+    }
+
+    function clearGenerationSpacer() {
+        generationSpacerPx = 0;
+        generationSpacerLocked = false;
+        if (generationSpacerEl) {
+            generationSpacerEl.remove();
+            generationSpacerEl = null;
+        }
+    }
+
+    function nudgeTavernScrollLock(chat) {
+        // 酒馆的 scrollLock 只在 scroll 回调里、且空隙小于 5px 时才会打开自动跟滚。
+        // 钳制 scrollTop 不派发 scroll，所以这里在已经吸底之后补一次。
+        if (!chat) return;
+        chat.dispatchEvent(new Event('scroll'));
+    }
+
+    function scheduleGenerationQuiet() {
+        if (generationQuietTimer !== null) clearTimeout(generationQuietTimer);
+        generationQuietTimer = setTimeout(() => {
+            generationQuietTimer = null;
+            if (!generationScrollFollow) return;
+            const chat = document.getElementById('chat');
+            suppressChatAnchorSample = true;
+            restoreChatScroll();
+            if (chat && isPageActive()) nudgeTavernScrollLock(chat);
+            const fresh = readChatAnchor();
+            if (fresh) stableChatAnchor = fresh;
+            suppressChatAnchorSample = false;
+            generationScrollFollow = false;
+            releaseIdleGenerationSpacer();
+        }, GENERATION_FOLLOW_QUIET_MS);
+    }
+
+    function armGenerationFollow() {
+        if (!isPageActive()) return;
+        generationScrollFollow = true;
+        suppressChatAnchorSample = true;
+        restoreChatScroll();
+        const chat = document.getElementById('chat');
+        if (chat) nudgeTavernScrollLock(chat);
+        const fresh = readChatAnchor();
+        if (fresh) stableChatAnchor = fresh;
+        suppressChatAnchorSample = false;
+        rememberTrackedMessage();
+        scheduleGenerationQuiet();
+    }
+
+    function placeholderText(message) {
+        const text = message && message.querySelector ? message.querySelector('.mes_text') : null;
+        if (!text) return '';
+        return (text.textContent || '').replace(/\s+/g, '');
+    }
+
+    function isGenerationPlaceholder(message) {
+        const value = placeholderText(message);
+        return value === '...' || value === '…';
+    }
+
+    function bindTrackedMessage(message) {
+        if (trackedMessageObserver) trackedMessageObserver.disconnect();
+        trackedMessageObserver = null;
+        trackedLastMessage = message;
+        trackedMessageHeight = 0;
+        trackedMessageInView = false;
+        if (!message || !window.ResizeObserver) {
+            rememberTrackedMessage();
+            return;
+        }
+        try {
+            trackedMessageObserver = new ResizeObserver(() => onTrackedMessageResize());
+            trackedMessageObserver.observe(message);
+        } catch (_) {
+            trackedMessageObserver = null;
+        }
+        rememberTrackedMessage();
+    }
+
+    function noteTrackedMessageHeight(height) {
+        const message = trackedLastMessage;
+        const chat = document.getElementById('chat');
+        if (!message || !chat || !isPageActive() || adjustingGenerationSpacer) return false;
+        const drop = trackedMessageHeight - height;
+        const wasPinned = !!(stableChatAnchor && stableChatAnchor.pinned) && !generationSpacerLocked;
+        if (generationScrollFollow) {
+            suppressChatAnchorSample = true;
+            restoreChatScroll();
+            nudgeTavernScrollLock(chat);
+            const fresh = readChatAnchor();
+            if (fresh) stableChatAnchor = fresh;
+            suppressChatAnchorSample = false;
+            scheduleGenerationQuiet();
+            rememberTrackedMessage();
+            return true;
+        }
+        // 已经写好的正文变矮，滚动被钳上去时才处理。贴底的读者跟着这一楼；
+        // 停在楼中间的读者用占位把高度补回去，避免上一楼被拉进屏幕。
+        if (drop > 0 && scrollClampedUp(chat) && !readerGesture) {
+            if (wasPinned) {
+                trackedMessageHeight = height;
+                armGenerationFollow();
+            } else {
+                preserveScrollAgainstShrink(chat);
+                rememberTrackedMessage();
+            }
+            return true;
+        }
+        if (drop < 0 && generationSpacerPx > 0) {
+            consumeGenerationSpacer(chat, -drop);
+            rememberTrackedMessage();
+            return true;
+        }
+        rememberTrackedMessage();
+        return false;
+    }
+
+    function onTrackedMessageResize() {
+        if (restoringChatScroll) return;
+        const message = trackedLastMessage;
+        if (!message || !message.isConnected) return;
+        noteTrackedMessageHeight(message.offsetHeight);
+    }
+
+    function syncTrackedMessage() {
+        const chat = document.getElementById('chat');
+        if (!chat) {
+            if (trackedMessageObserver) trackedMessageObserver.disconnect();
+            trackedMessageObserver = null;
+            trackedLastMessage = null;
+            return;
+        }
+        let message = null;
+        const children = chat.children;
+        for (let i = children.length - 1; i >= 0; i--) {
+            if (children[i].classList && children[i].classList.contains('mes')) {
+                message = children[i];
+                break;
+            }
+        }
+        if (message !== trackedLastMessage) bindTrackedMessage(message);
+    }
+
+    function onChatMutations(mutations) {
+        if (adjustingGenerationSpacer) return;
+        if (!isPageActive()) {
+            syncTrackedMessage();
+            return;
+        }
+        const previous = trackedLastMessage;
+        const wasInView = trackedMessageInView;
+        const wasPinned = !!(stableChatAnchor && stableChatAnchor.pinned);
+        let removedTail = false;
+        let removedMany = false;
+        for (let i = 0; i < mutations.length; i++) {
+            const mutation = mutations[i];
+            if (mutation.type !== 'childList' || mutation.target !== trackedChat) continue;
+            let removed = 0;
+            for (let n = 0; n < mutation.removedNodes.length; n++) {
+                const node = mutation.removedNodes[n];
+                if (!(node instanceof Element) || !node.classList.contains('mes')) continue;
+                removed++;
+                if (node === previous) removedTail = true;
+            }
+            if (removed > 1) removedMany = true;
+        }
+        syncTrackedMessage();
+        if (removedMany) return;
+        const chat = document.getElementById('chat');
+        if (generationScrollFollow) {
+            suppressChatAnchorSample = true;
+            restoreChatScroll();
+            if (chat) nudgeTavernScrollLock(chat);
+            const fresh = readChatAnchor();
+            if (fresh) stableChatAnchor = fresh;
+            suppressChatAnchorSample = false;
+            scheduleGenerationQuiet();
+            return;
+        }
+        // 整段拆掉时滚动已经被钳住。只在确实往上跳了的时候补高度，整表重绘不算。
+        if (removedTail && (wasInView || wasPinned) && scrollClampedUp(chat)) {
+            if (wasPinned) armGenerationFollow();
+            else preserveScrollAgainstShrink(chat);
+            return;
+        }
+        const message = trackedLastMessage;
+        if (message && message !== previous && isGenerationPlaceholder(message) && wasPinned && !generationSpacerLocked) {
+            armGenerationFollow();
+            return;
+        }
+        // 文字变成 "..." 和高度塌缩发生在同一轮任务里，ResizeObserver 晚于这次回调。
+        if (message && message === previous && message.isConnected &&
+            noteTrackedMessageHeight(message.offsetHeight)) {
+            return;
+        }
+        if (!generationSpacerLocked && !chatScrollHold && !suppressChatAnchorSample && !scrollClampedUp(chat)) {
+            const fresh = readChatAnchor();
+            if (fresh) stableChatAnchor = fresh;
+        }
+    }
+
+    function unbindGenerationScrollWatch() {
+        if (chatMutationObserver) chatMutationObserver.disconnect();
+        chatMutationObserver = null;
+        if (trackedMessageObserver) trackedMessageObserver.disconnect();
+        trackedMessageObserver = null;
+        trackedChat = null;
+        trackedLastMessage = null;
+        clearGenerationSpacer();
+    }
+
+    function bindGenerationScrollWatch() {
+        if (!isPageActive()) return;
+        const chat = document.getElementById('chat');
+        if (!chat) return;
+        if (chatMutationObserver && trackedChat === chat) {
+            syncTrackedMessage();
+            return;
+        }
+        if (chatMutationObserver) chatMutationObserver.disconnect();
+        trackedChat = chat;
+        syncTrackedMessage();
+        if (!window.MutationObserver) return;
+        try {
+            chatMutationObserver = new MutationObserver(onChatMutations);
+            chatMutationObserver.observe(chat, { childList: true, subtree: true, characterData: true });
+        } catch (_) {
+            chatMutationObserver = null;
+        }
     }
 
     let resourcesActive = isPageActive();
@@ -1620,6 +1993,7 @@
                 chatScrollHoldTimer = null;
             }
             resourcesActive = false;
+            unbindGenerationScrollWatch();
             pausePageResources();
             return;
         }
@@ -1627,6 +2001,7 @@
         resourcesActive = true;
         startChameleon();
         syncPerformancePreset();
+        bindGenerationScrollWatch();
         restoreChatScroll();
         if (chatScrollHold) armChatScrollHoldRelease();
         if (scheduler.readQueue.length || scheduler.writeQueue.length) scheduler.schedule();
@@ -1638,9 +2013,17 @@
         disposed = true;
         engineState.hudVisible = false;
         releaseChatScrollHold();
+        releaseGenerationFollow();
+        unbindGenerationScrollWatch();
         if (chatScrollObserver) chatScrollObserver.disconnect();
         chatScrollObserver = null;
         observedChat = null;
+        if (chatMutationObserver) chatMutationObserver.disconnect();
+        chatMutationObserver = null;
+        if (trackedMessageObserver) trackedMessageObserver.disconnect();
+        trackedMessageObserver = null;
+        trackedChat = null;
+        trackedLastMessage = null;
         pausePageResources();
         scheduler.readQueue.length = 0;
         scheduler.writeQueue.length = 0;
@@ -1656,9 +2039,14 @@
     listen(window, 'touchstart', noteChatScrollIntent, { capture: true, passive: true });
     listen(window, 'pointerdown', noteChatScrollIntent, { capture: true, passive: true });
     listen(window, 'wheel', noteChatScrollIntent, { capture: true, passive: true });
+    listen(window, 'touchend', noteChatScrollGestureEnd, { capture: true, passive: true });
+    listen(window, 'touchcancel', noteChatScrollGestureEnd, { capture: true, passive: true });
+    listen(window, 'pointerup', noteChatScrollGestureEnd, { capture: true, passive: true });
+    listen(window, 'pointercancel', noteChatScrollGestureEnd, { capture: true, passive: true });
     listen(document, 'scroll', onChatScroll, { capture: true, passive: true });
     listen(document, 'visibilitychange', syncPageResources);
     bindChatScrollObserver();
+    bindGenerationScrollWatch();
     stableChatAnchor = readChatAnchor();
     listen(window, 'pagehide', (event) => {
         pageSuspended = true;
@@ -1674,7 +2062,7 @@
     // 10. UNIFIED ENGINE NAMESPACE
     // ========================================================
     window.SillyClientEngine = {
-        version: '0.2.4',
+        version: '0.2.6',
         state: engineState,
         scheduler: scheduler,
         batcher: streamingBatcher,
