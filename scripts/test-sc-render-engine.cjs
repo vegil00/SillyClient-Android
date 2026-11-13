@@ -876,3 +876,119 @@ test("long chat skips measured offscreen messages without dropping text or movin
   assert.equal(result.restoredHeight, "");
   assert.equal(result.active, false);
 });
+
+test("unlock puts a bottom-pinned chat back after the upward height compensation", async () => {
+  const result = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    const fillChat = host => {
+      host.style.height = "240px";
+      host.style.overflow = "auto";
+      host.replaceChildren();
+      for (let index = 0; index < 24; index++) {
+        const message = document.createElement("div");
+        message.className = "mes";
+        message.style.height = "80px";
+        message.textContent = `message ${index}`;
+        host.append(message);
+      }
+    };
+    fillChat(chat);
+    chat.scrollTop = chat.scrollHeight;
+    const pinned = {
+      top: chat.scrollTop,
+      gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight,
+    };
+    renderTest.hide(true);
+    chat.style.height = "200px";
+    chat.scrollTop = Math.max(0, chat.scrollTop - 64);
+    const disturbed = chat.scrollTop;
+    renderTest.hide(false);
+    return {
+      pinned, disturbed,
+      restoredTop: chat.scrollTop,
+      restoredGap: chat.scrollHeight - chat.scrollTop - chat.clientHeight,
+    };
+  });
+  assert.ok(result.pinned.gap <= 4, `pre-lock gap ${result.pinned.gap}`);
+  assert.ok(result.disturbed < result.pinned.top - 30, `disturbed ${result.disturbed}`);
+  assert.ok(result.restoredGap <= 4, `restored gap ${result.restoredGap}`);
+});
+
+test("unlock keeps a mid-chat position after the viewport shrinks and the scroll jumps up", async () => {
+  const result = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "240px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 24; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = "80px";
+      chat.append(message);
+    }
+    chat.scrollTop = 96;
+    const before = chat.scrollTop;
+    renderTest.hide(true);
+    chat.scrollTop = 20;
+    renderTest.hide(false);
+    return { before, restored: chat.scrollTop };
+  });
+  assert.ok(Math.abs(result.restored - result.before) <= 1, `restored ${result.restored} from ${result.before}`);
+});
+
+test("a height change after unlock does not keep the upward compensation", async () => {
+  await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "240px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 24; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = "80px";
+      chat.append(message);
+    }
+    chat.scrollTop = chat.scrollHeight;
+    renderTest.hide(true);
+    renderTest.hide(false);
+    chat.style.height = "300px";
+    chat.scrollTop -= 60;
+  });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const result = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return { gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
+  });
+  assert.ok(result.gap <= 4, `gap after resize ${result.gap}`);
+});
+
+test("a touch after unlock keeps the position the reader just chose", async () => {
+  const result = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "240px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 24; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = "80px";
+      chat.append(message);
+    }
+    chat.scrollTop = chat.scrollHeight;
+    renderTest.hide(true);
+    chat.scrollTop = 0;
+    renderTest.hide(false);
+    const restored = chat.scrollHeight - chat.scrollTop - chat.clientHeight <= 4;
+    chat.scrollTop = 12;
+    window.dispatchEvent(new Event("touchstart"));
+    renderTest.timeout(640);
+    return {
+      restored,
+      kept: chat.scrollTop,
+      gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight,
+    };
+  });
+  assert.equal(result.restored, true);
+  assert.ok(Math.abs(result.kept - 12) <= 1, `kept ${result.kept}`);
+  assert.ok(result.gap > 4);
+});

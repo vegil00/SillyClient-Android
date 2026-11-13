@@ -1491,10 +1491,134 @@
         }
     }
 
+    // 锁屏会让 #chat 先变矮再变高。贴底时变矮只钳住 scrollTop，变高时酒馆的
+    // ResizeObserver 再把 scrollTop 减一截，解锁后阅读位置就偏上。隐藏时记下
+    // 贴底或滚动偏移，重新可见后的高度补偿都按这个位置收回。
+    const CHAT_BOTTOM_GAP = 4;
+    const CHAT_SCROLL_HOLD_MS = 640;
+    let stableChatAnchor = null;
+    let chatScrollHold = null;
+    let chatScrollHoldTimer = null;
+    let chatScrollObserver = null;
+    let observedChat = null;
+    let restoringChatScroll = false;
+    let suppressChatAnchorSample = false;
+    let pendingChatAnchor = null;
+
+    function releaseChatScrollHold() {
+        chatScrollHold = null;
+        if (chatScrollHoldTimer !== null) {
+            clearTimeout(chatScrollHoldTimer);
+            chatScrollHoldTimer = null;
+        }
+    }
+
+    function readChatAnchor() {
+        const chat = document.getElementById('chat');
+        if (!chat) return null;
+        const gap = chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+        return {
+            pinned: gap <= CHAT_BOTTOM_GAP,
+            scrollTop: chat.scrollTop,
+            scrollHeight: chat.scrollHeight
+        };
+    }
+
+    function commitPendingChatAnchor() {
+        if (!pendingChatAnchor || suppressChatAnchorSample || restoringChatScroll || chatScrollHold || !isPageActive()) {
+            pendingChatAnchor = null;
+            return;
+        }
+        stableChatAnchor = pendingChatAnchor;
+        pendingChatAnchor = null;
+    }
+
+    function bindChatScrollObserver() {
+        const chat = document.getElementById('chat');
+        if (!chat || !window.ResizeObserver) return;
+        if (chatScrollObserver && observedChat === chat) return;
+        if (chatScrollObserver) chatScrollObserver.disconnect();
+        observedChat = chat;
+        try {
+            chatScrollObserver = new ResizeObserver(() => {
+                // 酒馆的高度补偿也在这一轮回调里改 scrollTop。微任务晚于整轮回调，
+                // 能盖掉它，同时不把这次补偿写进稳定锚点。
+                suppressChatAnchorSample = true;
+                queueMicrotask(() => {
+                    restoreChatScroll();
+                    suppressChatAnchorSample = false;
+                });
+            });
+            chatScrollObserver.observe(chat);
+        } catch (_) {
+            chatScrollObserver = null;
+            observedChat = null;
+        }
+    }
+
+    function holdChatScroll() {
+        bindChatScrollObserver();
+        // 隐藏这一刻的位置就是读者正在看的位置。补偿滚动发生在之后的高度变化里。
+        if (!suppressChatAnchorSample) {
+            const live = readChatAnchor();
+            if (live) stableChatAnchor = live;
+        }
+        pendingChatAnchor = null;
+        chatScrollHold = stableChatAnchor;
+    }
+
+    function restoreChatScroll() {
+        if (restoringChatScroll || !chatScrollHold) return;
+        const chat = document.getElementById('chat');
+        if (!chat) return;
+        restoringChatScroll = true;
+        try {
+            const hold = chatScrollHold;
+            const max = Math.max(0, chat.scrollHeight - chat.clientHeight);
+            const target = hold.pinned
+                ? max
+                : Math.min(max, Math.max(0, hold.scrollTop + (chat.scrollHeight - hold.scrollHeight)));
+            if (Math.abs(chat.scrollTop - target) > 1) chat.scrollTop = target;
+        } finally {
+            restoringChatScroll = false;
+        }
+    }
+
+    function armChatScrollHoldRelease() {
+        if (chatScrollHoldTimer !== null) clearTimeout(chatScrollHoldTimer);
+        chatScrollHoldTimer = setTimeout(() => {
+            chatScrollHoldTimer = null;
+            restoreChatScroll();
+            const fresh = readChatAnchor();
+            if (fresh) stableChatAnchor = fresh;
+            chatScrollHold = null;
+        }, CHAT_SCROLL_HOLD_MS);
+    }
+
+    function noteChatScrollIntent() {
+        if (!chatScrollHold) return;
+        releaseChatScrollHold();
+    }
+
+    function onChatScroll(event) {
+        const chat = document.getElementById('chat');
+        if (!chat || event.target !== chat) return;
+        // 脚本改 scrollTop 时，Chrome 仍会派发 isTrusted 的 scroll，不能拿它当读者手势。
+        if (restoringChatScroll || suppressChatAnchorSample || chatScrollHold || !isPageActive()) return;
+        pendingChatAnchor = readChatAnchor();
+        queueMicrotask(commitPendingChatAnchor);
+    }
+
     let resourcesActive = isPageActive();
     function syncPageResources() {
         if (disposed) return;
         if (!isPageActive()) {
+            // 只在第一次进入隐藏时取样。视口外消息随后会恢复排版，滚动值已经不可信。
+            if (resourcesActive) holdChatScroll();
+            if (chatScrollHoldTimer !== null) {
+                clearTimeout(chatScrollHoldTimer);
+                chatScrollHoldTimer = null;
+            }
             resourcesActive = false;
             pausePageResources();
             return;
@@ -1503,6 +1627,8 @@
         resourcesActive = true;
         startChameleon();
         syncPerformancePreset();
+        restoreChatScroll();
+        if (chatScrollHold) armChatScrollHoldRelease();
         if (scheduler.readQueue.length || scheduler.writeQueue.length) scheduler.schedule();
         startDiagnostics();
     }
@@ -1511,6 +1637,10 @@
         if (disposed) return;
         disposed = true;
         engineState.hudVisible = false;
+        releaseChatScrollHold();
+        if (chatScrollObserver) chatScrollObserver.disconnect();
+        chatScrollObserver = null;
+        observedChat = null;
         pausePageResources();
         scheduler.readQueue.length = 0;
         scheduler.writeQueue.length = 0;
@@ -1523,7 +1653,13 @@
         window.__scRenderEngineInstalled = false;
     }
 
+    listen(window, 'touchstart', noteChatScrollIntent, { capture: true, passive: true });
+    listen(window, 'pointerdown', noteChatScrollIntent, { capture: true, passive: true });
+    listen(window, 'wheel', noteChatScrollIntent, { capture: true, passive: true });
+    listen(document, 'scroll', onChatScroll, { capture: true, passive: true });
     listen(document, 'visibilitychange', syncPageResources);
+    bindChatScrollObserver();
+    stableChatAnchor = readChatAnchor();
     listen(window, 'pagehide', (event) => {
         pageSuspended = true;
         if (event.persisted) syncPageResources();
