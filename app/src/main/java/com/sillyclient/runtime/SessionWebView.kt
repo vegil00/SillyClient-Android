@@ -13,19 +13,28 @@ import android.webkit.WebView
  * then stops the page that is reading the reply. While a reply is still in
  * progress the page stays logically visible so tokens continue to land in the chat.
  *
- * That lie leaves the message box focused after the keyboard has already been
- * dismissed. A later tap on the same box does not ask for the keyboard again,
- * so the first time the real window is on screen the focused node is cleared
- * and the input connection is rebuilt.
+ * The page is created with the platform WebView style so a tap can focus the
+ * message box and raise the keyboard on the first launch. While a covered reply
+ * is kept logically visible, the focused node is cleared the next time the real
+ * window is shown, because a tap on that same node would not ask for the keyboard.
  */
-class SessionWebView @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-    defStyleAttr: Int = 0,
-) : WebView(context, attrs, defStyleAttr) {
+class SessionWebView : WebView {
+    constructor(context: Context) : super(context)
+    constructor(context: Context, attrs: AttributeSet?) : super(context, attrs)
+    constructor(context: Context, attrs: AttributeSet?, defStyleAttr: Int) : super(context, attrs, defStyleAttr)
+
     private val visibilitySignals = SessionVisibility()
     private var runWhileCovered = false
     private var pendingInputRestore = false
+
+    init {
+        // WebView(context) applies the platform webView style, which is what makes a
+        // tap move focus into the page and open the keyboard. A default style of 0
+        // skips that, so the message box can be tapped from the first launch and
+        // still never raise the keyboard.
+        isFocusable = true
+        isFocusableInTouchMode = true
+    }
 
     fun isRunWhileCovered(): Boolean = runWhileCovered
 
@@ -36,7 +45,13 @@ class SessionWebView @JvmOverloads constructor(
     }
 
     override fun onWindowVisibilityChanged(visibility: Int) {
-        apply(visibilitySignals.onWindowVisibility(visibility == VISIBLE))
+        val signals = visibilitySignals.onWindowVisibility(visibility == VISIBLE)
+        if (!runWhileCovered) {
+            super.onWindowVisibilityChanged(visibility)
+            apply(signals.filter { it == SessionVisibility.Signal.RESUME || it == SessionVisibility.Signal.RESTORE_INPUT })
+            return
+        }
+        apply(signals)
     }
 
     override fun onVisibilityAggregated(isVisible: Boolean) {
@@ -56,14 +71,8 @@ class SessionWebView @JvmOverloads constructor(
     private fun apply(signals: List<SessionVisibility.Signal>) {
         for (signal in signals) {
             when (signal) {
-                SessionVisibility.Signal.SHOW -> {
-                    super.onWindowVisibilityChanged(VISIBLE)
-                    super.onVisibilityAggregated(true)
-                }
-                SessionVisibility.Signal.HIDE -> {
-                    super.onWindowVisibilityChanged(GONE)
-                    super.onVisibilityAggregated(false)
-                }
+                SessionVisibility.Signal.SHOW -> super.onWindowVisibilityChanged(VISIBLE)
+                SessionVisibility.Signal.HIDE -> super.onWindowVisibilityChanged(GONE)
                 SessionVisibility.Signal.RESUME -> {
                     onResume()
                     resumeTimers()
