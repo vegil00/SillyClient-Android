@@ -419,7 +419,7 @@ test("a renderer installed while hidden starts no timers frames or observers", a
   });
   assert.deepEqual(result, {
     hidden: { intervals: 0, frames: 0, observers: 0, timers: 0 },
-    resumed: { intervals: 0, frames: 0, observers: 3, timers: 2 },
+    resumed: { intervals: 0, frames: 0, observers: 4, timers: 2 },
   });
 });
 
@@ -573,8 +573,8 @@ test("once completion cancels owned jobs and stale startup or mutation callbacks
     };
   });
   assert.deepEqual(result, {
-    settled: { sampled: true, observers: 1, jobs: [] },
-    observers: 1, jobs: [], reports: 2,
+    settled: { sampled: true, observers: 2, jobs: [] },
+    observers: 2, jobs: [], reports: 2,
   });
 });
 
@@ -590,7 +590,7 @@ test("disabled extraction cancels startup and ignores late mutation notification
     return { disabled, observers: renderTest.activeObservers("mutation"), jobs: renderTest.chameleonJobs() };
   });
   assert.deepEqual(result, {
-    disabled: { observers: 1, jobs: [] }, observers: 1, jobs: [],
+    disabled: { observers: 2, jobs: [] }, observers: 2, jobs: [],
   });
 });
 
@@ -611,7 +611,7 @@ test("completed once extraction remains dormant across repeated visibility and B
       observers: renderTest.activeObservers("mutation"), jobs: renderTest.chameleonJobs(),
     };
   });
-  assert.deepEqual(result, { sampled: true, observers: 1, jobs: [] });
+  assert.deepEqual(result, { sampled: true, observers: 2, jobs: [] });
 });
 
 test("explicit native refresh can recalibrate completed once extraction without restarting automatic work", async () => {
@@ -631,7 +631,7 @@ test("explicit native refresh can recalibrate completed once extraction without 
     };
   });
   assert.deepEqual(result, {
-    lastColor: 0xff000000 | 40 << 16 | 50 << 8 | 60, sampled: true, observers: 1, jobs: [],
+    lastColor: 0xff000000 | 40 << 16 | 50 << 8 | 60, sampled: true, observers: 2, jobs: [],
   });
 });
 
@@ -680,7 +680,7 @@ test("changing completed once extraction to realtime restores observation and ch
     };
   });
   assert.deepEqual(result, {
-    sampled: false, observers: 2,
+    sampled: false, observers: 3,
     recentColors: [0xff000000 | 40 << 16 | 50 << 8 | 60, 0xff000000 | 70 << 16 | 80 << 8 | 90],
   });
 });
@@ -700,7 +700,7 @@ test("changing pending once extraction to realtime cancels both once-settle path
       observers: renderTest.activeObservers("mutation"), pendingAfterChange, jobs: renderTest.chameleonJobs(),
     };
   });
-  assert.deepEqual(result, { sampled: false, observers: 2, pendingAfterChange: [1500], jobs: [1500] });
+  assert.deepEqual(result, { sampled: false, observers: 3, pendingAfterChange: [1500], jobs: [1500] });
 });
 
 for (const mode of ["once", "realtime"]) {
@@ -719,7 +719,7 @@ for (const mode of ["once", "realtime"]) {
       };
     }, mode);
     assert.deepEqual(result, {
-      sampled: mode === "once", observers: mode === "once" ? 1 : 2,
+      sampled: mode === "once", observers: mode === "once" ? 2 : 3,
       jobs: mode === "once" ? [] : [1500], lastColor: 0xff000000 | 10 << 16 | 20 << 8 | 30,
     });
   });
@@ -991,4 +991,236 @@ test("a touch after unlock keeps the position the reader just chose", async () =
   assert.equal(result.restored, true);
   assert.ok(Math.abs(result.kept - 12) <= 1, `kept ${result.kept}`);
   assert.ok(result.gap > 4);
+});
+
+test("regenerating the visible floor keeps the viewport on that floor as it collapses and regrows", async () => {
+  const before = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "320px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 8; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 7 ? "900px" : "180px";
+      message.innerHTML = `<div class="mes_text">floor ${index}</div>`;
+      chat.append(message);
+    }
+    const last = chat.lastElementChild;
+    chat.scrollTop = last.offsetTop + 24;
+    await Promise.resolve();
+    return { top: chat.scrollTop, gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
+  });
+  await page.evaluate(() => {
+    const last = document.getElementById("chat").lastElementChild;
+    last.style.height = "32px";
+    last.querySelector(".mes_text").textContent = "...";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const collapsed = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return { top: chat.scrollTop, gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
+  });
+  await page.evaluate(() => {
+    const messages = document.getElementById("chat").querySelectorAll(".mes");
+    const last = messages[messages.length - 1];
+    last.style.height = "420px";
+    last.querySelector(".mes_text").textContent = "regenerated floor";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const regrown = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return { top: chat.scrollTop, gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
+  });
+  assert.ok(before.gap > 4, `reader was not pinned, gap ${before.gap}`);
+  assert.ok(Math.abs(collapsed.top - before.top) <= 1, `collapse moved the reader from ${before.top} to ${collapsed.top}`);
+  assert.ok(Math.abs(regrown.top - before.top) <= 1, `regrowth moved the reader from ${before.top} to ${regrown.top}`);
+});
+
+test("an already written floor can shrink well below its old height without pulling the reader upward", async () => {
+  const before = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "320px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 8; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 7 ? "900px" : "180px";
+      message.innerHTML = `<div class="mes_text">floor ${index} already written</div>`;
+      chat.append(message);
+    }
+    const last = chat.lastElementChild;
+    chat.scrollTop = last.offsetTop + 80;
+    await Promise.resolve();
+    return chat.scrollTop;
+  });
+  for (const height of [700, 500, 300, 220]) {
+    await page.evaluate(next => {
+      const messages = document.getElementById("chat").querySelectorAll(".mes");
+      messages[messages.length - 1].style.height = next + "px";
+    }, height);
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  const shrunk = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  await page.evaluate(() => {
+    const messages = document.getElementById("chat").querySelectorAll(".mes");
+    messages[messages.length - 1].style.height = "640px";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const regrown = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  assert.ok(Math.abs(shrunk - before) <= 1, `stepwise shrink moved the reader from ${before} to ${shrunk}`);
+  assert.ok(Math.abs(regrown - before) <= 1, `regrowth moved the reader from ${before} to ${regrown}`);
+});
+
+test("a bottom-pinned floor stays at the bottom while its written text shrinks and regrows", async () => {
+  await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "320px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 6; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 5 ? "900px" : "180px";
+      message.textContent = `floor ${index}`;
+      chat.append(message);
+    }
+    chat.scrollTop = chat.scrollHeight;
+    await Promise.resolve();
+  });
+  await page.evaluate(() => {
+    document.getElementById("chat").lastElementChild.style.height = "220px";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const shrunk = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+  });
+  await page.evaluate(() => {
+    document.getElementById("chat").lastElementChild.style.height = "700px";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const regrown = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+  });
+  assert.ok(shrunk <= 4, `shrunk gap ${shrunk}`);
+  assert.ok(regrown <= 4, `regrown gap ${regrown}`);
+});
+
+test("removing the visible floor keeps the reader where that floor was", async () => {
+  const before = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "320px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 8; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 7 ? "900px" : "180px";
+      message.innerHTML = `<div class="mes_text">floor ${index}</div>`;
+      chat.append(message);
+    }
+    const last = chat.lastElementChild;
+    chat.scrollTop = last.offsetTop + 40;
+    await Promise.resolve();
+    return chat.scrollTop;
+  });
+  await page.evaluate(() => {
+    const last = document.getElementById("chat").lastElementChild;
+    last.style.display = "none";
+    last.remove();
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const removed = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    const message = document.createElement("div");
+    message.className = "mes";
+    message.style.height = "48px";
+    message.innerHTML = `<div class="mes_text">...</div>`;
+    chat.append(message);
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  await page.evaluate(() => {
+    const last = document.getElementById("chat").lastElementChild;
+    last.style.height = "640px";
+    last.querySelector(".mes_text").textContent = "new floor";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const grown = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  assert.ok(Math.abs(removed - before) <= 1, `removal moved the reader from ${before} to ${removed}`);
+  assert.ok(Math.abs(grown - before) <= 1, `replacement moved the reader from ${before} to ${grown}`);
+});
+
+test("shrinking a floor below the viewport does not pull the reader down", async () => {
+  const before = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "240px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 10; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 9 ? "700px" : "200px";
+      message.innerHTML = `<div class="mes_text">floor ${index}</div>`;
+      chat.append(message);
+    }
+    chat.scrollTop = 0;
+    await Promise.resolve();
+    return chat.scrollTop;
+  });
+  await page.evaluate(() => {
+    const last = document.getElementById("chat").lastElementChild;
+    last.style.height = "32px";
+    last.querySelector(".mes_text").textContent = "...";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const after = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  assert.equal(after, before);
+});
+
+test("a touch during regeneration keeps the position the reader just chose", async () => {
+  const before = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "280px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 6; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 5 ? "800px" : "160px";
+      message.innerHTML = `<div class="mes_text">floor ${index}</div>`;
+      chat.append(message);
+    }
+    const last = chat.lastElementChild;
+    chat.scrollTop = last.offsetTop + 20;
+    await Promise.resolve();
+    return chat.scrollTop;
+  });
+  await page.evaluate(() => {
+    const last = document.getElementById("chat").lastElementChild;
+    last.style.height = "36px";
+    last.querySelector(".mes_text").textContent = "...";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const held = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    chat.scrollTop = 30;
+    window.dispatchEvent(new Event("touchstart"));
+  });
+  await page.evaluate(() => {
+    const messages = document.getElementById("chat").querySelectorAll(".mes");
+    messages[messages.length - 1].style.height = "500px";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const kept = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return { top: chat.scrollTop, gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
+  });
+  assert.ok(Math.abs(held - before) <= 1, `shrink moved the reader from ${before} to ${held}`);
+  assert.ok(Math.abs(kept.top - 30) <= 1, `kept ${kept.top}`);
+  assert.ok(kept.gap > 4);
 });
