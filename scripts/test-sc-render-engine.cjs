@@ -1022,7 +1022,8 @@ test("regenerating the visible floor keeps the viewport on that floor as it coll
     return { top: chat.scrollTop, gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
   });
   await page.evaluate(() => {
-    const last = document.getElementById("chat").lastElementChild;
+    const messages = document.getElementById("chat").querySelectorAll(".mes");
+    const last = messages[messages.length - 1];
     last.style.height = "420px";
     last.querySelector(".mes_text").textContent = "regenerated floor";
   });
@@ -1032,14 +1033,84 @@ test("regenerating the visible floor keeps the viewport on that floor as it coll
     return { top: chat.scrollTop, gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
   });
   assert.ok(before.gap > 4, `reader was not pinned, gap ${before.gap}`);
-  assert.ok(collapsed.gap <= 4, `collapsed gap ${collapsed.gap}`);
-  assert.ok(collapsed.top < before.top, "collapse moves with the shorter floor");
-  assert.ok(regrown.gap <= 4, `regrown gap ${regrown.gap}`);
-  assert.ok(regrown.top > collapsed.top, "new text stays in view");
+  assert.ok(Math.abs(collapsed.top - before.top) <= 1, `collapse moved the reader from ${before.top} to ${collapsed.top}`);
+  assert.ok(Math.abs(regrown.top - before.top) <= 1, `regrowth moved the reader from ${before.top} to ${regrown.top}`);
 });
 
-test("removing the visible floor keeps the replacement at the bottom", async () => {
+test("an already written floor can shrink well below its old height without pulling the reader upward", async () => {
+  const before = await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "320px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 8; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 7 ? "900px" : "180px";
+      message.innerHTML = `<div class="mes_text">floor ${index} already written</div>`;
+      chat.append(message);
+    }
+    const last = chat.lastElementChild;
+    chat.scrollTop = last.offsetTop + 80;
+    await Promise.resolve();
+    return chat.scrollTop;
+  });
+  for (const height of [700, 500, 300, 220]) {
+    await page.evaluate(next => {
+      const messages = document.getElementById("chat").querySelectorAll(".mes");
+      messages[messages.length - 1].style.height = next + "px";
+    }, height);
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  const shrunk = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  await page.evaluate(() => {
+    const messages = document.getElementById("chat").querySelectorAll(".mes");
+    messages[messages.length - 1].style.height = "640px";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const regrown = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  assert.ok(Math.abs(shrunk - before) <= 1, `stepwise shrink moved the reader from ${before} to ${shrunk}`);
+  assert.ok(Math.abs(regrown - before) <= 1, `regrowth moved the reader from ${before} to ${regrown}`);
+});
+
+test("a bottom-pinned floor stays at the bottom while its written text shrinks and regrows", async () => {
   await page.evaluate(async () => {
+    const chat = document.getElementById("chat");
+    chat.style.height = "320px";
+    chat.style.overflow = "auto";
+    chat.replaceChildren();
+    for (let index = 0; index < 6; index++) {
+      const message = document.createElement("div");
+      message.className = "mes";
+      message.style.height = index === 5 ? "900px" : "180px";
+      message.textContent = `floor ${index}`;
+      chat.append(message);
+    }
+    chat.scrollTop = chat.scrollHeight;
+    await Promise.resolve();
+  });
+  await page.evaluate(() => {
+    document.getElementById("chat").lastElementChild.style.height = "220px";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const shrunk = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+  });
+  await page.evaluate(() => {
+    document.getElementById("chat").lastElementChild.style.height = "700px";
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const regrown = await page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+  });
+  assert.ok(shrunk <= 4, `shrunk gap ${shrunk}`);
+  assert.ok(regrown <= 4, `regrown gap ${regrown}`);
+});
+
+test("removing the visible floor keeps the reader where that floor was", async () => {
+  const before = await page.evaluate(async () => {
     const chat = document.getElementById("chat");
     chat.style.height = "320px";
     chat.style.overflow = "auto";
@@ -1054,6 +1125,7 @@ test("removing the visible floor keeps the replacement at the bottom", async () 
     const last = chat.lastElementChild;
     chat.scrollTop = last.offsetTop + 40;
     await Promise.resolve();
+    return chat.scrollTop;
   });
   await page.evaluate(() => {
     const last = document.getElementById("chat").lastElementChild;
@@ -1061,10 +1133,7 @@ test("removing the visible floor keeps the replacement at the bottom", async () 
     last.remove();
   });
   await new Promise(resolve => setTimeout(resolve, 80));
-  const removed = await page.evaluate(() => {
-    const chat = document.getElementById("chat");
-    return chat.scrollHeight - chat.scrollTop - chat.clientHeight;
-  });
+  const removed = await page.evaluate(() => document.getElementById("chat").scrollTop);
   await page.evaluate(() => {
     const chat = document.getElementById("chat");
     const message = document.createElement("div");
@@ -1080,12 +1149,9 @@ test("removing the visible floor keeps the replacement at the bottom", async () 
     last.querySelector(".mes_text").textContent = "new floor";
   });
   await new Promise(resolve => setTimeout(resolve, 80));
-  const grown = await page.evaluate(() => {
-    const chat = document.getElementById("chat");
-    return chat.scrollHeight - chat.scrollTop - chat.clientHeight;
-  });
-  assert.ok(removed <= 4, `removed gap ${removed}`);
-  assert.ok(grown <= 4, `grown gap ${grown}`);
+  const grown = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  assert.ok(Math.abs(removed - before) <= 1, `removal moved the reader from ${before} to ${removed}`);
+  assert.ok(Math.abs(grown - before) <= 1, `replacement moved the reader from ${before} to ${grown}`);
 });
 
 test("shrinking a floor below the viewport does not pull the reader down", async () => {
@@ -1116,7 +1182,7 @@ test("shrinking a floor below the viewport does not pull the reader down", async
 });
 
 test("a touch during regeneration keeps the position the reader just chose", async () => {
-  await page.evaluate(async () => {
+  const before = await page.evaluate(async () => {
     const chat = document.getElementById("chat");
     chat.style.height = "280px";
     chat.style.overflow = "auto";
@@ -1131,6 +1197,7 @@ test("a touch during regeneration keeps the position the reader just chose", asy
     const last = chat.lastElementChild;
     chat.scrollTop = last.offsetTop + 20;
     await Promise.resolve();
+    return chat.scrollTop;
   });
   await page.evaluate(() => {
     const last = document.getElementById("chat").lastElementChild;
@@ -1138,22 +1205,22 @@ test("a touch during regeneration keeps the position the reader just chose", asy
     last.querySelector(".mes_text").textContent = "...";
   });
   await new Promise(resolve => setTimeout(resolve, 80));
-  const followed = await page.evaluate(() => {
+  const held = await page.evaluate(() => document.getElementById("chat").scrollTop);
+  await page.evaluate(() => {
     const chat = document.getElementById("chat");
-    const gap = chat.scrollHeight - chat.scrollTop - chat.clientHeight <= 4;
     chat.scrollTop = 30;
     window.dispatchEvent(new Event("touchstart"));
-    return gap;
   });
   await page.evaluate(() => {
-    document.getElementById("chat").lastElementChild.style.height = "500px";
+    const messages = document.getElementById("chat").querySelectorAll(".mes");
+    messages[messages.length - 1].style.height = "500px";
   });
   await new Promise(resolve => setTimeout(resolve, 80));
   const kept = await page.evaluate(() => {
     const chat = document.getElementById("chat");
     return { top: chat.scrollTop, gap: chat.scrollHeight - chat.scrollTop - chat.clientHeight };
   });
-  assert.equal(followed, true);
+  assert.ok(Math.abs(held - before) <= 1, `shrink moved the reader from ${before} to ${held}`);
   assert.ok(Math.abs(kept.top - 30) <= 1, `kept ${kept.top}`);
   assert.ok(kept.gap > 4);
 });
