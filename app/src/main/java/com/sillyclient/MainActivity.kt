@@ -1,8 +1,10 @@
 package com.sillyclient
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
@@ -62,6 +64,9 @@ import com.sillyclient.runtime.InstanceRepository
 import com.sillyclient.runtime.InstanceUsageStore
 import com.sillyclient.runtime.DependencyBank
 import com.sillyclient.runtime.KeepAlive
+import com.sillyclient.runtime.SessionContinuity
+import com.sillyclient.runtime.SessionReceiveScript
+import com.sillyclient.runtime.SessionWebView
 import com.sillyclient.runtime.InstanceRemoval
 import com.sillyclient.runtime.WebpackCacheSeed
 import com.sillyclient.runtime.InstanceMaintenance
@@ -165,7 +170,7 @@ class MainActivity : BridgeActivity() {
     private lateinit var topScrimBar: TopScrimBar     // 酒馆顶框 scrim 条（渐变+光泽+色波）
     private lateinit var tavernStatusHint: TavernStatusHint
     private lateinit var webViewScreen: FrameLayout
-    private lateinit var webView: WebView
+    private lateinit var webView: SessionWebView
     private val tavernPageSession = TavernPageSession()
     private var tavernDocumentGeneration = 0L
     private var tavernDocumentFailed = false
@@ -233,6 +238,12 @@ class MainActivity : BridgeActivity() {
         var ready: Boolean
     )
     private val serverSessions = java.util.concurrent.ConcurrentHashMap<String, ServerSession>()
+    private val sessionContinuity = SessionContinuity()
+    private var sessionLeaseHeld = false
+    private val sessionProbeGeneration = java.util.concurrent.atomic.AtomicLong()
+    private var sessionNoticeRequested = false
+    private val sessionContinuityTick = Runnable { syncSessionContinuity() }
+    private val sessionReceiveBridge = SessionReceiveBridge()
 
     /** 回环端口探测：仅校验 127.0.0.1 绑定（服务以 HOST=127.0.0.1 启动）。 */
     private fun isLoopbackPortFree(port: Int): Boolean = runCatching {
@@ -340,6 +351,7 @@ class MainActivity : BridgeActivity() {
 
     companion object {
         private const val TAG = "SillyClient"
+        private const val REQUEST_SESSION_NOTIFICATION = 0x5C11
         private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 
         private const val BG = 0xFF070408.toInt()
@@ -680,7 +692,7 @@ class MainActivity : BridgeActivity() {
         )
         cleanupStaleExportTempFiles()
 
-        webView = WebView(this).apply {
+        webView = SessionWebView(this).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
             }
@@ -716,6 +728,7 @@ class MainActivity : BridgeActivity() {
             overScrollMode = View.OVER_SCROLL_NEVER
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(tavernDownloadBridge, "SillyClientAndroidDownloads")
+            addJavascriptInterface(sessionReceiveBridge, SessionReceiveScript.BRIDGE)
             renderEngineManager.attachBridges(this)
             setDownloadListener { url, _, contentDisposition, mimeType, contentLength ->
                 requestTavernUrlDownload(url, contentDisposition, mimeType, contentLength)
@@ -736,6 +749,7 @@ class MainActivity : BridgeActivity() {
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    closeSessionContinuity()
                     tavernDownloadBridge.invalidateSession()
                     tavernDocumentGeneration++
                     tavernDocumentFailed = false
@@ -751,6 +765,7 @@ class MainActivity : BridgeActivity() {
                     super.onPageCommitVisible(view, url)
                     renderDocumentCommitState.markCommitted(renderDocumentCommitState.currentToken)
                     android.util.Log.i(TAG, "Tavern main frame committed")
+                    installSessionReceiveSupport()
                     injectDeepSeekModelOptions()
                 }
 
@@ -805,6 +820,7 @@ class MainActivity : BridgeActivity() {
                     super.onPageFinished(v, url)
                     android.util.Log.i(TAG, "Tavern load finished; not a render-success signal")
                     installTavernDownloadSupport(url)
+                    installSessionReceiveSupport()
                     installChameleonProbes()
                     injectRenderEngine()
                     injectMobileLayoutOptimizations()
@@ -992,6 +1008,109 @@ class MainActivity : BridgeActivity() {
         resumeHeartbeatHeal()
         if (isWebViewVisible && ::webView.isInitialized) {
             renderEngineManager.forceChameleonSample(webView)
+        }
+    }
+
+    override fun onPause() {
+        // 回复还在接收时，先把前台服务立起来，再交给系统切走。锁屏冻结发生在 onStop 前后。
+        syncSessionContinuity()
+        super.onPause()
+        keepTavernExecuting()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        sessionContinuity.onHostVisible(true)
+        syncSessionContinuity()
+    }
+
+    override fun onStop() {
+        sessionContinuity.onHostVisible(false)
+        syncSessionContinuity()
+        super.onStop()
+        keepTavernExecuting()
+        probeGenerating()
+    }
+
+    /**
+     * 锁屏或切到其他应用时，正在接收的回复继续收数据并写回聊天。
+     * 页面保持可执行，本机 Node 也不被系统冻住；回复结束后随即放开。
+     */
+    private fun syncSessionContinuity() {
+        if (isDestroyed) return
+        val hold = sessionContinuity.shouldHoldProcess()
+        val pin = sessionContinuity.shouldPinWebView()
+        if (::webView.isInitialized) webView.setRunWhileCovered(pin)
+        if (hold && !sessionLeaseHeld) {
+            if (sessionContinuity.isHostVisible()) ensureSessionNotificationPermission()
+            KeepAlive.acquire(this, KeepAlive.Reason.SESSION)
+            sessionLeaseHeld = true
+        } else if (!hold && sessionLeaseHeld) {
+            KeepAlive.release(applicationContext, KeepAlive.Reason.SESSION)
+            sessionLeaseHeld = false
+        }
+        if (pin) keepTavernExecuting()
+        handler.removeCallbacks(sessionContinuityTick)
+        val delay = sessionContinuity.millisUntilChange()
+        if (delay != null) handler.postDelayed(sessionContinuityTick, delay)
+    }
+
+    private fun keepTavernExecuting() {
+        if (!::webView.isInitialized || isDestroyed) return
+        if (!webView.isRunWhileCovered()) return
+        webView.onResume()
+        webView.resumeTimers()
+    }
+
+    private fun installSessionReceiveSupport() {
+        if (!::webView.isInitialized || isDestroyed) return
+        webView.evaluateJavascript(SessionReceiveScript.source(), null)
+    }
+
+    private fun probeGenerating() {
+        if (!::webView.isInitialized || isDestroyed || tavernUrl.isBlank()) return
+        val token = sessionProbeGeneration.get()
+        webView.evaluateJavascript(SessionReceiveScript.GENERATING_PROBE) { raw ->
+            if (token != sessionProbeGeneration.get() || isDestroyed) return@evaluateJavascript
+            if (raw == "true") {
+                sessionContinuity.onReceiving(true)
+                syncSessionContinuity()
+            }
+        }
+    }
+
+    private fun closeSessionContinuity() {
+        sessionProbeGeneration.incrementAndGet()
+        sessionContinuity.onSessionClosed()
+        syncSessionContinuity()
+    }
+
+    private fun ensureSessionNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || sessionNoticeRequested) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        sessionNoticeRequested = true
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_SESSION_NOTIFICATION)
+    }
+
+    private inner class SessionReceiveBridge {
+        @android.webkit.JavascriptInterface
+        fun setReceiving(active: Boolean) {
+            val token = sessionProbeGeneration.get()
+            handler.post {
+                if (isDestroyed || token != sessionProbeGeneration.get()) return@post
+                sessionContinuity.onReceiving(active)
+                syncSessionContinuity()
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        fun pulse() {
+            val token = sessionProbeGeneration.get()
+            handler.post {
+                if (isDestroyed || token != sessionProbeGeneration.get()) return@post
+                sessionContinuity.onPulse()
+                syncSessionContinuity()
+            }
         }
     }
 
@@ -1688,6 +1807,7 @@ class MainActivity : BridgeActivity() {
      *  删除流程专用——经完整 closeTavern 二次停止会递增监管 generation，
      *  误杀后台物理清理线程，导致"卡片消失但文件残留"。 */
     private fun closeTavernUi(operation: OperationCoordinator.Operation? = null) {
+        closeSessionContinuity()
         chameleonController.reset()
         tavernStatusHint.dismiss()
         tavernDownloadBridge.invalidateSession()
@@ -3346,6 +3466,11 @@ body:has(.popup[opening]) #chat {
 
 
     override fun onDestroy() {
+        handler.removeCallbacks(sessionContinuityTick)
+        if (sessionLeaseHeld) {
+            KeepAlive.release(applicationContext, KeepAlive.Reason.SESSION)
+            sessionLeaseHeld = false
+        }
         externalPopups.clear()
         // bundledRuntime 是应用级单例（类文档约定 per-app），其 worker 由
         // Activity 生命周期关闭会在同进程复用时毒化后续全部启动，故不在此关闭。
