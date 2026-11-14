@@ -25,6 +25,10 @@ local.properties
 *.hprof
 *.apk
 
+# Signing keys stay on the build machine.
+*.jks
+*.keystore
+
 
 # Bundled dependency archives exceed GitHub's 100MB blob limit; kept local-only.
 app/src/main/assets/bundled/*.tar
