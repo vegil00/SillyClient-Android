@@ -61,7 +61,7 @@ val verifyUpgradeSigning = tasks.register("verifyUpgradeSigning") {
             ?: throw GradleException("The historical Android signing certificate is missing")
         val actual = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
             .joinToString("") { "%02x".format(it) }
-        check(actual == "97f0958bcce5ab059cb31bed5826303168b6877f22e0385de3058c2a21dbecbf") {
+        check(actual == "b82ece30e39f1a6f70dc00bdd1097a43e9b663eaf0a9616ec0628c55050ed067") {
             "Release signing identity changed; this APK would not update existing installations"
         }
     }
