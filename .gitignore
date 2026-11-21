@@ -5,6 +5,7 @@
 local.properties
 /build/
 /app/build/
+/cursor-chat/build/
 /captures
 .externalNativeBuild/
 .cxx/
