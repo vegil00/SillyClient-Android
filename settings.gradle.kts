@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "SillyClient"
 include(":app")
+include(":cursor-chat")
