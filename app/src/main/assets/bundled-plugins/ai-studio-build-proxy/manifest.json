@@ -1,0 +1,31 @@
+{
+  "schema": "sillyclient.bundled-plugin",
+  "version": 1,
+  "id": "ai-studio-build-proxy",
+  "revision": 1,
+  "repository": "starowo/AIStudioBuildProxy",
+  "license": "MIT",
+  "serverCommit": "edb301450724b0a194bfb55d5533682a12f4e5b6",
+  "clientCommit": "c5d6d32698a62553816ba7ab46eb90bdd2c302a9",
+  "server": {
+    "target": "plugins/AIStudioBuildProxy",
+    "entry": "index.js",
+    "files": {
+      "LICENSE": "4D876C49A94DD648466BA1B250C4444C1BC94404477A4B38D2D3F7EC10CE9E69",
+      "index.js": "39E0543E131A4C1588F7B89746EB9DD1B9EDD6EA5FE7DAFA00AFDFB7A89DA774",
+      "package.json": "1FD772CF3D56F0E8CC2A996383EC9B92E87E8F7B5798168A869655FB55FD38AF",
+      "server.js": "90497AE04436031847A416BF22A6A4D561AF2B5CF756D0016ADBADA2A5626CB9"
+    }
+  },
+  "client": {
+    "target": "public/scripts/extensions/third-party/AIStudioBuildProxy",
+    "entry": "manifest.json",
+    "files": {
+      "LICENSE": "4D876C49A94DD648466BA1B250C4444C1BC94404477A4B38D2D3F7EC10CE9E69",
+      "index.html": "1D1A839D378CAA21B1B8CD8D887AF21F76274F9270EB1E7EEF4F615010964ECC",
+      "index.js": "2E890234982739E6427EC8A4D376E3815184D92E865D794AAB4AB62ADA3D8BDC",
+      "manifest.json": "33989154043642775B8FE408255A9AAE3106014EF896618BCB1BF5E3735DBFC2",
+      "style.css": "A248C8F65646489E614155F11BB367AF9A87C958631C0BD2D05512E17F840443"
+    }
+  }
+}

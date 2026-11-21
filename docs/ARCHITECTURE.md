@@ -171,6 +171,19 @@ SHA-256、字节数和许可证元数据，不包含第三方源码；扩展仅�
 已有有效扩展不覆盖，也不修改用户的禁用设置；取消或启动失败只回滚本次新建且内容、
 目录身份和归属标记均未变化的扩展。扩展脚本不会在安装器中执行。
 
+### 内置 AI Studio 反代
+
+每次启动实例时，`AiStudioBuildProxyInstaller` 把 MIT 许可的
+[AIStudioBuildProxy](https://github.com/starowo/AIStudioBuildProxy) 写入实例，不经过上面的可选清单。
+服务端插件固定为 `server` 提交 `edb301450724b0a194bfb55d5533682a12f4e5b6`，
+落到 `plugins/AIStudioBuildProxy/`；客户端扩展固定为 `client` 提交
+`c5d6d32698a62553816ba7ab46eb90bdd2c302a9`，落到
+`public/scripts/extensions/third-party/AIStudioBuildProxy/`。
+`express` 和 `ws` 使用酒馆自己的 `node_modules`，不执行上游 `setup.sh`，也不打包安装 zip。
+客户端清单里的 `auto_update` 固定为 false，避免没有 git 的 Android 每次启动都尝试更新。
+同名目录若已存在且不是本安装器的旧版本，原样保留。启动失败只回滚本次新建或替换、且内容与归属标记都未变化的文件。
+`enableServerPlugins` 仍只在配置缺少该键时回填为 true；用户显式关闭时不改写。
+
 `RuntimeConfiguration` 使用实例已安装的 `yaml` 解析器及内置 Bionic Node.js，
 拒绝非法、非映射 YAML，保留注释、未知字段及既有安全配置，只原子更新宿主管理的键。
 主题或扩展写入前确认 `dataRoot` 指向该实例标准 `data/`；自定义数据根明确拒绝，
