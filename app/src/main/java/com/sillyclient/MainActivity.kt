@@ -52,6 +52,8 @@ import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.graphics.Insets
 import androidx.documentfile.provider.DocumentFile
 import com.getcapacitor.JSObject
+import com.sillyclient.runtime.AiStudioBuildProxyInstaller
+import com.sillyclient.runtime.AiStudioBuildProxyTransaction
 import com.sillyclient.runtime.InstanceDataImport
 import com.sillyclient.runtime.CompanionPresetInstaller
 import com.sillyclient.runtime.CompanionPresetRequest
@@ -1202,10 +1204,12 @@ class MainActivity : BridgeActivity() {
             runtimeDiagnostic("provision.begin instance=$id storage=$storage")
             var presetTransaction: CompanionPresetTransaction? = null
             var extensionsTransaction: PreinstalledExtensionsTransaction? = null
+            var proxyTransaction: AiStudioBuildProxyTransaction? = null
             var launched: Process? = null
             fun rollbackPresets() {
                 runCatching { presetTransaction?.rollback() }.onFailure { appendLog("[WARN] 主题预设回滚失败，已有文件保留") }
                 runCatching { extensionsTransaction?.rollback() }.onFailure { appendLog("[WARN] 扩展回滚未完成，已有文件保留") }
+                runCatching { proxyTransaction?.rollback() }.onFailure { appendLog("[WARN] AI Studio 反代回滚未完成，已有文件保留") }
             }
             try {
                 previousStop.get(5, TimeUnit.SECONDS)
@@ -1268,6 +1272,12 @@ class MainActivity : BridgeActivity() {
                     operations.ensureCurrent(operation)
                     appendLog("[OK] SC Bordeaux 主题预设已就绪")
                 }
+                updateProgress(96, "内置 AI Studio 反代")
+                operations.ensureCurrent(operation)
+                proxyTransaction = AiStudioBuildProxyInstaller.install(this, targetServerDir)
+                operations.ensureCurrent(operation)
+                if (proxyTransaction?.applied == true) appendLog("[OK] AI Studio 反代已写入实例")
+                if (proxyTransaction?.keptExisting == true) appendLog("[OK] AI Studio 反代已存在，保留现有文件")
                 updateProgress(97, "Starting server")
                 ensureDependenciesForLaunch(paths, targetServerDir, operation)
                 bundledDependencyArchive(paths) { operations.ensureCurrent(operation) }?.let { (key, _) ->
@@ -1288,6 +1298,7 @@ class MainActivity : BridgeActivity() {
                     operations.commit(operation) {
                         presetTransaction?.commit()
                         extensionsTransaction?.commit()
+                        proxyTransaction?.commit()
                         // 多开：服务进程在就绪后脱离启动操作的生命周期——
                         // 此后任何新操作（如下一次启动/维护）的取消都不会杀死本实例。
                         processSupervisor.forget(launched)

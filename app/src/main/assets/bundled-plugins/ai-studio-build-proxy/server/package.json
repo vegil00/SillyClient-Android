@@ -1,0 +1,15 @@
+{
+    "name": "ai-studio-build-proxy",
+    "version": "1.0.0",
+    "description": "A proxy plugin for AI Studio builds",
+    "main": "index.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "dependencies": {
+        "express": "^4.18.2",
+        "ws": "^8.13.0"
+    },
+    "author": "SoliUmbra",
+    "license": "MIT"
+}
