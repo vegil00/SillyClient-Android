@@ -13,8 +13,8 @@ android {
         applicationId = "com.sillyclient"
         minSdk = 26
         targetSdk = 37
-        versionCode = 86
-        versionName = "1.14.11"
+        versionCode = 87
+        versionName = "1.14.12"
     }
 
     buildTypes {
@@ -61,7 +61,7 @@ val verifyUpgradeSigning = tasks.register("verifyUpgradeSigning") {
             ?: throw GradleException("The historical Android signing certificate is missing")
         val actual = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
             .joinToString("") { "%02x".format(it) }
-        check(actual == "b82ece30e39f1a6f70dc00bdd1097a43e9b663eaf0a9616ec0628c55050ed067") {
+        check(actual == "cb5f977c760f774e05254b9fffd2570fdd563d8dc81363782d7f4ad1afbdac92") {
             "Release signing identity changed; this APK would not update existing installations"
         }
     }
