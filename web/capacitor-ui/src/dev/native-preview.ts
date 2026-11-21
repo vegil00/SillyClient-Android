@@ -36,6 +36,11 @@ let directoryDelay = 0;
 let zipSelection: ZipSelection | null | undefined;
 let exportResult: ExportResult | null = null;
 let exportRejectMessage: string | null = null;
+let cursorAccount: { signedIn: boolean; email?: string; name?: string } = {
+  signedIn: true,
+  email: "preview@example.com",
+  name: "Preview",
+};
 
 function syntheticRoot() {
   return platform === "windows" ? "D:\\Synthetic" : platform === "android"
@@ -366,6 +371,23 @@ export const nativePreview: TarvenEnvPlugin = {
       }
     }
     return result;
+  },
+  async getCursorAccount() {
+    record("getCursorAccount");
+    return cursorAccount.signedIn ? cursorAccount : { signedIn: false };
+  },
+  async startCursorLogin() {
+    record("startCursorLogin");
+    cursorAccount = { signedIn: true, email: "preview@example.com", name: "Preview" };
+    return cursorAccount;
+  },
+  async cancelCursorLogin() {
+    record("cancelCursorLogin");
+  },
+  async signOutCursor() {
+    record("signOutCursor");
+    cursorAccount = { signedIn: false };
+    return cursorAccount;
   },
 };
 

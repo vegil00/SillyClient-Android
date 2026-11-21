@@ -1,7 +1,7 @@
 import React, { useState, useRef, useLayoutEffect } from "react";
 import { X, ChevronRight } from "lucide-react";
 import { TarvenEnv } from "../../capacitor-plugin";
-import type { ContentOpenMode, AppUpdateInfo, RenderEngineSettings } from "../../capacitor-plugin";
+import type { ContentOpenMode, AppUpdateInfo, CursorAccountStatus, RenderEngineSettings } from "../../capacitor-plugin";
 import { cn } from "../../lib/utils";
 import { LAYERS } from "../../constants/layers";
 import { ActionButton } from "../common/ActionButton";
@@ -35,6 +35,9 @@ export interface AppSettingsDrawerProps {
   appUpdateInfo: AppUpdateInfo | null;
   checkForAppUpdate: () => Promise<any>;
   openProjectPage: () => void;
+  cursorAccount?: CursorAccountStatus | null;
+  onSignOutCursor?: () => void;
+  cursorSignOutPending?: boolean;
   onOpenCleanGarbage: () => void;
 }
 
@@ -121,6 +124,9 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
   appUpdateInfo,
   checkForAppUpdate,
   openProjectPage,
+  cursorAccount,
+  onSignOutCursor,
+  cursorSignOutPending = false,
   onOpenCleanGarbage,
 }) => {
   const [appSettingsTab, setAppSettingsTab] = useState<
@@ -162,6 +168,8 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
     contentOpenMode,
     appUpdateState,
     appUpdateInfo,
+    cursorAccount,
+    cursorSignOutPending,
   ]);
 
   if (!isOpen && !isClosing) return null;
@@ -260,6 +268,24 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
             inert={appSettingsTab !== "general"}
           >
             <div className="app-settings-list space-y-1">
+              {cursorAccount?.signedIn && onSignOutCursor && (
+                <AppSettingsRow
+                  label="Cursor 账号"
+                  desc={cursorAccount.email || cursorAccount.name || "已登录"}
+                >
+                  <button
+                    type="button"
+                    onClick={onSignOutCursor}
+                    disabled={cursorSignOutPending}
+                    className={cn(
+                      "motion-control h-8 rounded-full px-3 text-[11px] font-medium disabled:opacity-40",
+                      isLight ? "bg-black/[0.06] text-[#1a1625]/80" : "bg-white/10 text-white/80"
+                    )}
+                  >
+                    {cursorSignOutPending ? "正在退出" : "退出登录"}
+                  </button>
+                </AppSettingsRow>
+              )}
               <AppSettingsRow
                 label="下拉刷新"
                 desc="在酒馆界面顶部下拉即可刷新"
