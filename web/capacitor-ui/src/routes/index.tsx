@@ -44,6 +44,8 @@ import { VersionDropdownMenu } from "@/components/modals/VersionDropdownMenu";
 import { CardActionMenu } from "@/components/modals/CardActionMenu";
 import { LaunchConsoleModal } from "@/components/modals/LaunchConsoleModal";
 import { UnlockInstanceModal } from "@/components/modals/UnlockInstanceModal";
+import { CursorLoginScreen } from "@/components/auth/CursorLoginScreen";
+import type { CursorAccountStatus } from "@/capacitor-plugin";
 import type { TavernInstance, OperationPurpose } from "@/types";
 
 const OnboardingGuide = lazy(() => import("@/components/onboarding/OnboardingGuide"));
@@ -263,6 +265,64 @@ function SillyClientLauncher() {
     ? `SillyClient ${APP_VERSION} · iOS · NodeMobile`
     : `SillyClient ${APP_VERSION} · Android shell`;
   const terminalPlaceholder = isWindows ? "输入 Windows 命令" : isIOS ? "iOS 进程内环境（可查看服务运行日志）" : "输入 Android shell 命令";
+  const requiresCursorAccount = isAndroid && !isNativePreview && !isOnboardingSandbox && !isShowcase;
+  const [cursorAccount, setCursorAccount] = useState<CursorAccountStatus | null>(null);
+  const [cursorReady, setCursorReady] = useState(!requiresCursorAccount);
+  const [cursorWaiting, setCursorWaiting] = useState(false);
+  const [cursorError, setCursorError] = useState<string | null>(null);
+  const [cursorSignOutPending, setCursorSignOutPending] = useState(false);
+  useEffect(() => {
+    if (!requiresCursorAccount) return;
+    let cancelled = false;
+    TarvenEnv.getCursorAccount()
+      .then((account) => {
+        if (!cancelled) setCursorAccount(account.signedIn ? account : null);
+      })
+      .catch(() => {
+        if (!cancelled) setCursorAccount(null);
+      })
+      .finally(() => {
+        if (!cancelled) setCursorReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [requiresCursorAccount]);
+  const startCursorLogin = useCallback(async () => {
+    setCursorWaiting(true);
+    setCursorError(null);
+    try {
+      const account = await TarvenEnv.startCursorLogin();
+      if (account.signedIn) setCursorAccount(account);
+      else setCursorError("登录未完成，请重试");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Cursor 登录失败";
+      if (!message.includes("取消")) setCursorError(message);
+    } finally {
+      setCursorWaiting(false);
+    }
+  }, []);
+  const cancelCursorLogin = useCallback(async () => {
+    try {
+      await TarvenEnv.cancelCursorLogin();
+    } catch {
+      /* 进行中的登录会以取消结束 */
+    }
+    setCursorWaiting(false);
+  }, []);
+  const signOutCursor = useCallback(async () => {
+    setCursorSignOutPending(true);
+    try {
+      await TarvenEnv.signOutCursor();
+      setCursorAccount(null);
+      setCursorReady(true);
+      setCursorError(null);
+    } catch {
+      /* 退出失败时保留当前登录 */
+    } finally {
+      setCursorSignOutPending(false);
+    }
+  }, []);
   const [showOnboarding, setShowOnboarding] = useState(
     () => isOnboardingSandbox || ((!isWeb || isWindows || isDemoPreview) && !isShowcase && localStorage.getItem(ONBOARDING_KEY) !== ONBOARDING_VERSION),
   );
@@ -2504,6 +2564,21 @@ function SillyClientLauncher() {
     setShowNewInstancePanel(true);
   }, [isWeb, isShowcase, isLocalPreview]);
 
+  if (requiresCursorAccount && (!cursorReady || !cursorAccount?.signedIn)) {
+    return (
+      <CursorLoginScreen
+        checking={!cursorReady}
+        waiting={cursorWaiting}
+        error={cursorError}
+        isLight={isLight}
+        dynamic={bgMode === "dynamic"}
+        wallpaperUrl={bgMode === "custom" ? customWallpaperUrl : null}
+        onLogin={() => { void startCursorLogin(); }}
+        onCancel={() => { void cancelCursorLogin(); }}
+      />
+    );
+  }
+
   return (
     <div
       ref={scrollRef}
@@ -2907,6 +2982,12 @@ function SillyClientLauncher() {
         appUpdateInfo={appUpdateInfo}
         checkForAppUpdate={checkForAppUpdate}
         openProjectPage={openProjectPage}
+        cursorAccount={requiresCursorAccount ? cursorAccount : null}
+        onSignOutCursor={requiresCursorAccount ? () => {
+          closeAppMenu();
+          void signOutCursor();
+        } : undefined}
+        cursorSignOutPending={cursorSignOutPending}
         onOpenCleanGarbage={async () => {
           closeAppMenu();
           setCleaningGarbage(true);

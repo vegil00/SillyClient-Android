@@ -380,10 +380,28 @@ export interface TarvenEnvPlugin {
   /** 批量获取所有实例的密码保护状态 */
   listInstancePasswordStatus(): Promise<Record<string, boolean>>
 
+  /** 读取本机已保存的 Cursor 账号。不返回令牌。 */
+  getCursorAccount(): Promise<CursorAccountStatus>
+
+  /** 打开 cursor.com 完成登录，成功后只保存账号资料。 */
+  startCursorLogin(): Promise<CursorAccountStatus>
+
+  /** 取消正在进行的浏览器登录。 */
+  cancelCursorLogin(): Promise<void>
+
+  /** 清除本机 Cursor 登录状态。 */
+  signOutCursor(): Promise<CursorAccountStatus>
+
   addListener(
     eventName: 'log' | 'progress' | 'ready' | 'mode' | 'error',
     listenerFunc: (data: TarvenEvent) => void,
   ): Promise<PluginListenerHandle>
+}
+
+export interface CursorAccountStatus {
+  signedIn: boolean
+  email?: string
+  name?: string
 }
 
 export interface TarvenEvent {

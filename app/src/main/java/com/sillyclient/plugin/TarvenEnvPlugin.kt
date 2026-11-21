@@ -21,6 +21,12 @@ import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
 import com.sillyclient.MainActivity
+import com.sillyclient.auth.CursorAccount
+import com.sillyclient.auth.CursorAuthException
+import com.sillyclient.auth.CursorLogin
+import com.sillyclient.auth.CursorLoginClient
+import com.sillyclient.auth.CursorSessionStore
+import com.sillyclient.auth.HttpsCursorAuthTransport
 import com.sillyclient.auth.RemoteBasicAuthStore
 import com.sillyclient.download.TavernDownloadFiles
 import com.sillyclient.runtime.CompanionPresetInstaller
@@ -39,6 +45,10 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.channels.SeekableByteChannel
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
 
 /**
@@ -55,6 +65,10 @@ class TarvenEnvPlugin : Plugin() {
     private val releaseExecutor = java.util.concurrent.Executors.newSingleThreadExecutor {
         Thread(it, "SillyClient-releases").apply { isDaemon = true }
     }
+    private val authExecutor = java.util.concurrent.Executors.newSingleThreadExecutor {
+        Thread(it, "SillyClient-cursor-auth").apply { isDaemon = true }
+    }
+    private val loginGeneration = AtomicInteger()
     private var installationPicker: AlertDialog? = null
     private var installationPickerCall: PluginCall? = null
     private var storagePermissionDialog: AlertDialog? = null
@@ -78,6 +92,8 @@ class TarvenEnvPlugin : Plugin() {
     }
 
     override fun handleOnDestroy() {
+        loginGeneration.incrementAndGet()
+        authExecutor.shutdownNow()
         cancelStoragePermission()
         releaseExecutor.shutdownNow()
         installationPicker?.setOnCancelListener(null)
@@ -91,6 +107,7 @@ class TarvenEnvPlugin : Plugin() {
 
     @PluginMethod
     fun provisionAndStart(call: PluginCall) {
+        if (!requireCursorAccount(call)) return
         val act = activity as? MainActivity ?: run {
             call.reject("Not MainActivity")
             return
@@ -192,7 +209,109 @@ class TarvenEnvPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun getCursorAccount(call: PluginCall) {
+        call.resolve(cursorAccountResult(loadCursorAccount()))
+    }
+
+    @PluginMethod
+    fun startCursorLogin(call: PluginCall) {
+        val act = activity as? MainActivity ?: run {
+            call.reject("Not MainActivity")
+            return
+        }
+        val generation = loginGeneration.incrementAndGet()
+        authExecutor.execute {
+            try {
+                if (loginGeneration.get() != generation) {
+                    call.reject("登录已取消")
+                    return@execute
+                }
+                val handshake = CursorLogin.createHandshake()
+                openLoginBrowser(act, handshake.loginUrl)
+                val account = CursorLoginClient(HttpsCursorAuthTransport()).finish(handshake) {
+                    loginGeneration.get() != generation
+                }
+                if (loginGeneration.get() != generation) {
+                    call.reject("登录已取消")
+                    return@execute
+                }
+                CursorSessionStore.from(context).save(account)
+                call.resolve(account.toPluginObject())
+            } catch (error: CursorAuthException) {
+                call.reject(error.message ?: "Cursor 登录失败")
+            } catch (_: Exception) {
+                call.reject("Cursor 登录失败")
+            }
+        }
+    }
+
+    @PluginMethod
+    fun cancelCursorLogin(call: PluginCall) {
+        loginGeneration.incrementAndGet()
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun signOutCursor(call: PluginCall) {
+        loginGeneration.incrementAndGet()
+        try {
+            CursorSessionStore.from(context).clear()
+            call.resolve(signedOutCursorAccount())
+        } catch (_: Exception) {
+            call.reject("退出登录失败")
+        }
+    }
+
+    private fun requireCursorAccount(call: PluginCall): Boolean {
+        if (loadCursorAccount() != null) return true
+        call.reject("请先登录 Cursor 账号")
+        return false
+    }
+
+    private fun loadCursorAccount(): CursorAccount? = try {
+        CursorSessionStore.from(context).load()
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun openLoginBrowser(activity: MainActivity, url: String) {
+        CursorLogin.assertBrowserUrl(url)
+        val failed = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        activity.runOnUiThread {
+            try {
+                activity.openExternalUrl(url)
+            } catch (_: Exception) {
+                failed.set(true)
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!latch.await(5, TimeUnit.SECONDS) || failed.get()) {
+            throw CursorAuthException("无法打开系统浏览器")
+        }
+    }
+
+    private fun cursorAccountResult(account: CursorAccount?): JSObject =
+        account?.toPluginObject() ?: signedOutCursorAccount()
+
+    private fun signedOutCursorAccount(): JSObject {
+        val result = JSObject()
+        result.put("signedIn", false)
+        return result
+    }
+
+    private fun CursorAccount.toPluginObject(): JSObject {
+        val result = JSObject()
+        result.put("signedIn", true)
+        if (email.isNotBlank()) result.put("email", email)
+        if (name.isNotBlank()) result.put("name", name)
+        return result
+    }
+
+    @PluginMethod
     fun enterImmersive(call: PluginCall) {
+        if (!requireCursorAccount(call)) return
         val act = activity as? MainActivity ?: run { call.reject("Not MainActivity"); return }
         val url = call.data.optString("url", "")
         val target = if (url.isEmpty()) null else url
@@ -245,6 +364,7 @@ class TarvenEnvPlugin : Plugin() {
 
     @PluginMethod
     fun returnToTavern(call: PluginCall) {
+        if (!requireCursorAccount(call)) return
         val act = activity as? MainActivity ?: run { call.reject("Not MainActivity"); return }
         act.runOnUiThread {
             try {
@@ -854,6 +974,7 @@ class TarvenEnvPlugin : Plugin() {
 
     @PluginMethod
     fun sendCommand(call: PluginCall) {
+        if (!requireCursorAccount(call)) return
         val act = activity as? MainActivity ?: run { call.reject("Not MainActivity"); return }
         val text = call.data.optString("text", "")
         val instanceId = call.data.optString("instanceId", "").trim()

@@ -122,6 +122,10 @@ const methods = {
   },
   async importInstanceData() { return { imported: 12, bytes: 4096, skipped: 2 }; },
   async listInstancePasswordStatus() { return {}; },
+  async getCursorAccount() { return { signedIn: true, email: "tutorial@example.com", name: "演练账号" }; },
+  async startCursorLogin() { return { signedIn: true, email: "tutorial@example.com", name: "演练账号" }; },
+  async cancelCursorLogin() { return; },
+  async signOutCursor() { return { signedIn: false }; },
   async getRemoteBasicAuthStatus() { return { configured: false }; },
   async sendCommand({ instanceId, text }) {
     emit("log", { instanceId, message: `练习模式：未执行命令 ${text}`, source: "command", level: "info" });
